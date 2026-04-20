@@ -18,6 +18,14 @@ const GENERATOR_TIME_LIMIT_MS = 60_000;
 const GENERATOR_MEM_LIMIT_MB = 1024;
 
 /**
+ * True when Node is running as root. On Render we run as UID 1000 so
+ * this is false and every chown below becomes a no-op -- same rationale
+ * as in routes/submit.ts. Saves a syscall and avoids spamming EPERM.
+ */
+const isRootNode: boolean =
+  typeof process.geteuid === "function" && process.geteuid() === 0;
+
+/**
  * Compile a generator's C++ source. Compilation runs OUTSIDE nsjail
  * (it's a trusted `g++` invocation on admin-submitted source, same
  * trust boundary as the existing /generate-tests endpoint) but uses
@@ -103,14 +111,16 @@ generateTestsRouter.post("/", async (req: Request, res: Response) => {
     const outPath = path.join(workDir, "gen.out");
     await fs.writeFile(srcPath, code, "utf8");
     // Make sure the pool UID can read the source and write the binary.
-    await fs.chown(srcPath, uid, uid).catch(() => {});
+    // Only meaningful when Node runs as root; under unprivileged Node
+    // (Render) the files are already owned by the running UID.
+    if (isRootNode) await fs.chown(srcPath, uid, uid).catch(() => {});
 
     const compileRes = await compileGenerator(workDir, srcPath, outPath);
     if (!compileRes.ok) {
       res.status(400).json({ error: `Compilation failed\n${compileRes.stderr}` });
       return;
     }
-    await fs.chown(outPath, uid, uid).catch(() => {});
+    if (isRootNode) await fs.chown(outPath, uid, uid).catch(() => {});
 
     const sandboxRes = await runSandboxed({
       argv: ["./gen.out"],

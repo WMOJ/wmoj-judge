@@ -92,11 +92,13 @@ COPY --from=builder /app/dist ./dist
 COPY languages.json policy.kafel ./
 
 # Pre-generate the JVM Class Data Sharing archive. Faster Java cold
-# starts; tolerate failure (architectures / JVMs without CDS still
-# boot, just without the speedup).
+# starts AND required -- languages.json runs `java -Xshare:on
+# -XX:SharedArchiveFile=/app/jvm-cds.jsa`, which would fail at judge
+# time if this archive is missing. Fail the build loudly if the dump
+# cannot be produced; a silent fallback here makes every Java
+# submission break at runtime with a confusing error.
 RUN java -Xshare:dump -XX:SharedArchiveFile=/app/jvm-cds.jsa \
-        > /tmp/cds.log 2>&1 \
-    || echo "WARN: JVM CDS dump failed; java will run without -Xshare:on"
+        > /tmp/cds.log 2>&1
 
 # Run Node as the judge-1000 unprivileged user. This is REQUIRED on
 # Render-style unprivileged containers because nsjail's initNsFromChild

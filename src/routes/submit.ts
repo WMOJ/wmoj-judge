@@ -95,31 +95,14 @@ function validateSubmit(body: unknown): { ok: true; value: SubmitRequest } | { o
 }
 
 /**
- * Map a legacy language code to its current equivalent. Logs a
- * deprecation warning the first time in-process each legacy code is
- * seen; still accepted for the cutover window.
+ * Map a legacy language code to its current equivalent. Deprecation
+ * warnings are emitted once per process by `executorFor` in
+ * `src/executors/index.ts` -- the single entry point for language
+ * dispatch -- so this function stays silent to avoid double-logging.
  */
-const legacyWarned = new Set<string>();
-
 function normalizeLanguage(lang: Language | "python" | "cpp"): Language {
-  if (lang === "python") {
-    if (!legacyWarned.has("python")) {
-      legacyWarned.add("python");
-      logger.warn(
-        "legacy language code 'python' received; mapping to 'python3'. Update the client.",
-      );
-    }
-    return "python3";
-  }
-  if (lang === "cpp") {
-    if (!legacyWarned.has("cpp")) {
-      legacyWarned.add("cpp");
-      logger.warn(
-        "legacy language code 'cpp' received; mapping to 'cpp17'. Update the client.",
-      );
-    }
-    return "cpp17";
-  }
+  if (lang === "python") return "python3";
+  if (lang === "cpp") return "cpp17";
   return lang;
 }
 
@@ -320,11 +303,26 @@ submitRouter.post("/", async (req: Request, res: Response) => {
 });
 
 /**
+ * True when Node is running as root (effective UID 0). Captured once at
+ * module load. On Render we run Node as UID 1000 so this is false, and
+ * every chownTree below becomes a no-op -- a non-root process cannot
+ * chown to a foreign UID, and even chowning to our own UID would just
+ * spam EPERM (fs.chown only succeeds for CAP_CHOWN or matching UID).
+ * Because the workdir was mkdtemp'd by us and the sandbox inherits our
+ * UID (no --user flag), files are already owned by the process that
+ * will execute them -- no chown needed.
+ */
+const isRootNode: boolean =
+  typeof process.geteuid === "function" && process.geteuid() === 0;
+
+/**
  * Recursively chown every entry under `dir` to `uid:uid`. Used after
  * `executor.prepare()` so the sandboxed pool UID can read/execute what
- * Node (running as root) just wrote.
+ * Node (running as root) just wrote. No-op when Node is unprivileged
+ * (see `isRootNode`).
  */
 async function chownTree(dir: string, uid: number): Promise<void> {
+  if (!isRootNode) return;
   const entries = await fs.readdir(dir, { withFileTypes: true });
   await fs.chown(dir, uid, uid).catch(() => {});
   for (const entry of entries) {

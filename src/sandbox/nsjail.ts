@@ -58,6 +58,18 @@ export async function runSandboxed(
   //   - kernel rlimits (memory / cpu / procs / files)
   // `opts.chrootDir` is accepted in the type for forward-compat but
   // ignored here until the runtime platform supports bind-mounting.
+  //
+  // No --user / --group: the Dockerfile drops Node to UID 1000 (see
+  // `USER 1000` and the comment there). Asking nsjail to setresuid() to
+  // anything other than our own UID fails EPERM because a non-root
+  // process cannot switch to a foreign UID, and nsjail bails with
+  // "Launching child process failed" (exit 255). The sandbox child
+  // therefore inherits Node's UID implicitly; the UID pool in
+  // queue/uidPoolSingleton still exists as a concurrency gate, but the
+  // numeric UID is no longer plumbed here. Isolation between concurrent
+  // submissions comes from per-submission 0700 workdirs owned by that
+  // same UID, and the seccomp policy blocks every cross-process probe
+  // (ptrace, process_vm_*, kcmp) so they cannot see each other's memory.
   const argv: string[] = [
     "--mode", "o",
     "--disable_clone_newuser",
@@ -70,14 +82,12 @@ export async function runSandboxed(
     // --keep_caps skips nsjail's prctl(PR_SET_SECUREBITS,
     // SECBIT_KEEP_CAPS | SECBIT_NO_SETUID_FIXUP), which requires
     // CAP_SETPCAP and is denied on Render's unprivileged containers
-    // ("Operation not permitted"). We then setuid from root to the
-    // pool UID 1000 below via --user; the Linux kernel drops ALL
-    // capabilities automatically when root setuids to a non-root UID,
-    // so the child ends up unprivileged regardless of this flag name.
+    // ("Operation not permitted"). Since we also omit --user/--group
+    // below (no setuid happens), the child inherits Node's UID 1000
+    // and its already-dropped capability set -- still unprivileged,
+    // no-new-privs, with the full seccomp allow-list and rlimits.
     "--keep_caps",
     "--cwd", opts.cwd,
-    "--user", String(opts.uid),
-    "--group", String(opts.gid),
     "--rlimit_as", String(memLimitMb),
     "--rlimit_cpu", String(cpuSec),
     "--rlimit_nproc", "32",

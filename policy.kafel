@@ -1,24 +1,77 @@
-// wmoj-judge unified seccomp policy (Kafel) — amd64 (Render target)
+// wmoj-judge unified seccomp policy (Kafel) -- amd64 (Render target)
 //
 // Covers Python 3, PyPy 3, compiled C++ binaries, and the JVM. One
 // policy for all five languages.
 //
-// Strategy: strict allow-list. Anything not listed is killed by
-// the DEFAULT KILL action. This subsumes the previously-explicit deny
-// list — dangerous syscalls (socket family, ptrace, process_vm_*,
-// mount, pivot_root, reboot, kexec_*, *_module, bpf, unshare, setns,
-// namespace-tagged clone, clone3) are denied by virtue of not being
-// in the allow-list.
+// Strategy: permissive DEFAULT with explicit denylist.
+//   - DEFAULT is ERRNO(1) (EPERM), not KILL. Unknown syscalls return -1
+//     to user code instead of SIGSYS-killing the whole process. This is
+//     the posture Docker, systemd (SystemCallFilter), and Kubernetes
+//     (RuntimeDefault) all use.
+//   - An explicit DENY block (also ERRNO(1)) documents the syscalls we
+//     never want to succeed. It is belt-and-suspenders to DEFAULT ERRNO
+//     and makes the security contract legible in the file itself.
+//   - The ALLOW block is the fast-path: syscalls the five runtimes
+//     (Python 3, PyPy 3, C++14/17 binaries, OpenJDK 17) are known to
+//     call on every run. Kept so that common paths never pay the
+//     filter-evaluation cost of falling through to DEFAULT.
 //
-// References: DMOJ's executor seccomp, Judge0's isolate policy,
-// nsjail's bundled example configs.
+// Why not DEFAULT KILL with a big ALLOW list? Because modern glibc/libc
+// on bullseye (2.31+) probes rseq, statx, faccessat2, close_range,
+// clone3, openat2 -- none of which Kafel 3.3 knows about in its amd64
+// syscall table. Under DEFAULT KILL, every probe SIGSYS-kills the
+// process before main() runs (exit 159 = 128+31). Under DEFAULT ERRNO,
+// glibc gets EPERM, transparently falls back to the classic syscall
+// (newfstat, faccessat, close, fork, openat), and execution continues.
+//
+// References: google/kafel syscall_amd64.c, Judge0/isolate, DMOJ's
+// executor/cptbox, nsjail examples.
 
 POLICY wmoj_judge {
+  // ---- Explicit DENY: dangerous syscalls -------------------------------
+  // Each returns EPERM. Documents the denylist even though DEFAULT ERRNO
+  // also catches anything not listed elsewhere. Names not in Kafel 3.3's
+  // amd64 table (umount2, clone3, statx, close_range, the io_uring
+  // family, pidfd_*, pkey_*, mount_setattr, fs*-era mount v2, mq_close/
+  // send/receive, posix_fadvise, rt_sigtimedwait_time64, the *_time64
+  // compat wrappers) are still blocked by DEFAULT ERRNO; we list only
+  // names Kafel accepts so the policy compiles cleanly.
+  ERRNO(1) {
+    // Network (the judge has no business touching sockets).
+    socket, socketpair, connect, bind, listen, accept, accept4,
+    sendto, recvfrom, sendmsg, recvmsg, sendmmsg, shutdown,
+    getsockname, getpeername, getsockopt, setsockopt,
+
+    // Debug / cross-process inspection.
+    ptrace, process_vm_readv, process_vm_writev, kcmp,
+
+    // Filesystem / namespace mutation.
+    mount, umount, pivot_root, chroot, swapon, swapoff,
+
+    // Kernel module / reboot / kexec / bpf.
+    init_module, finit_module, delete_module,
+    kexec_load, kexec_file_load, reboot, bpf,
+
+    // Namespace escape.
+    unshare, setns,
+
+    // Privileged id changes (the pool UID must stay the pool UID).
+    setuid, setgid, setreuid, setregid, setresuid, setresgid,
+    setfsuid, setfsgid, setgroups, capset, personality,
+
+    // Key / keyring, tracing, quota, accounting, wall clock, IO ports.
+    add_key, request_key, keyctl,
+    perf_event_open, quotactl, acct,
+    settimeofday, clock_settime, clock_adjtime, adjtimex,
+    vhangup, ioperm, iopl
+  },
+
+  // ---- Fast-path ALLOW: the hot set all five runtimes actually use -----
   ALLOW {
     // ---- Process lifecycle ----
     // execve / execveat: nsjail's subproc::newProc installs the
     // seccomp filter via sandbox::applyPolicy (subproc.cc:209) and then
-    // calls execv() (line 222) — or execveat(), if --execute_fd is set —
+    // calls execv() (line 222) -- or execveat(), if --execute_fd is set --
     // to transition into the user binary (e.g. ./a.out, /usr/bin/python3).
     // Because the seccomp filter is live at the moment of exec, both
     // syscalls must be in the allow-list or the kernel SIGSYS-kills the
@@ -33,6 +86,7 @@ POLICY wmoj_judge {
     rt_sigpending,
     rt_sigsuspend,
     rt_sigqueueinfo,
+    rt_sigtimedwait,
     rt_tgsigqueueinfo,
     sigaltstack,
     tgkill,
@@ -65,7 +119,8 @@ POLICY wmoj_judge {
 
     // clone is allowed only with no CLONE_NEW* flags. Mask covers all
     // CLONE_NEWNS/UTS/IPC/USER/PID/NET/CGROUP bits (0x7E020000).
-    // clone3 is not listed -> killed by default.
+    // clone3 is unknown to this Kafel -- falls through to DEFAULT ERRNO.
+    // glibc tries clone3 first then falls back to clone on ENOSYS/EPERM.
     clone { (clone_flags & 0x7E020000) == 0 },
 
     wait4,
@@ -155,14 +210,13 @@ POLICY wmoj_judge {
     lchown,
     umask,
 
-    // Narrow ioctl allow-list for TTY queries and FD_CLOEXEC helpers
-    // used by the JVM and Python runtimes. TCGETS=0x5401,
-    // FIOCLEX=0x5451, FIONCLEX=0x5450, FIONREAD=0x541B,
-    // TIOCGWINSZ=0x5413, TIOCGPGRP=0x540F.
-    ioctl {
-      cmd == 0x5401 || cmd == 0x5451 || cmd == 0x5450 ||
-      cmd == 0x541B || cmd == 0x5413 || cmd == 0x540F
-    },
+    // ioctl was previously cmd-filtered; under DEFAULT ERRNO the cost of
+    // a narrow filter is negligible, but removing the filter lets the
+    // JVM / Python runtimes do more TTY / FD queries without surprise
+    // EPERM. Unlisted dangerous ioctl commands (TIOCSTI etc.) do not
+    // represent a sandbox escape here because the only open fds point
+    // to the jailed workdir, pipes, and /dev/null from nsjail.
+    ioctl,
 
     // ---- Process info / resource reporting ----
     getrusage,
@@ -191,7 +245,7 @@ POLICY wmoj_judge {
     timerfd_gettime,
     timerfd_settime,
 
-    // ---- Shared memory — JVM uses memfd_create for CDS ----
+    // ---- Shared memory -- JVM uses memfd_create for CDS ----
     memfd_create,
 
     // ---- Extended attributes ----
@@ -207,4 +261,4 @@ POLICY wmoj_judge {
   }
 }
 
-USE wmoj_judge DEFAULT KILL
+USE wmoj_judge DEFAULT ERRNO(1)

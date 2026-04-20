@@ -16,7 +16,12 @@ async function main(): Promise<void> {
   const app = express();
   app.use(httpLogger);
   app.use(cors());
-  app.use(express.json({ limit: "10mb" }));
+  // 250mb covers the worst case allowed by requestCaps (200 test cases
+  // * 1MB input + 200 * 1MB output + 100KB code + JSON envelope). A
+  // tighter express.json limit used to 413 before requestCaps could
+  // return its own 413 with a useful reason. Real-world payloads are
+  // tiny; this just stops express from pre-rejecting legitimate ones.
+  app.use(express.json({ limit: "250mb" }));
   app.use((_req, res, next) => { enterRequest(); let done=false; const end=()=>{if(!done){done=true;exitRequest();}}; res.on("finish", end); res.on("close", end); next(); });
   app.use("/health", healthRouter);
   const gated = [authMiddleware, createRateLimiter(), requestCaps];

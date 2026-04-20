@@ -73,12 +73,6 @@ export interface SandboxResult {
   killedBy: "TO" | "OOM" | "SIG" | null;
 }
 
-export declare function compare(
-  mode: CompareMode,
-  expected: string,
-  received: string,
-): boolean;
-
 export interface UidPool {
   acquire(): Promise<number>;
   release(uid: number): void;

@@ -3,6 +3,7 @@ import { pythonExecutor } from "./python";
 import { pypyExecutor } from "./pypy";
 import { createCppExecutor } from "./cpp";
 import { javaExecutor } from "./java";
+import { logger } from "../util/logger";
 
 const cpp14Executor = createCppExecutor("cpp14");
 const cpp17Executor = createCppExecutor("cpp17");
@@ -17,12 +18,13 @@ let warnedLegacyCpp = false;
  *
  * Accepts the canonical 5-language set plus the two legacy codes that the
  * wmoj-app may still send during the cutover window:
- *   - "python" → routed to the python3 executor
- *   - "cpp"    → routed to the cpp17 executor
+ *   - "python" -> routed to the python3 executor
+ *   - "cpp"    -> routed to the cpp17 executor
  *
  * Each legacy route emits a single warn-level log line per process on
- * first use. No silent drops; unknown codes throw so the caller can turn
- * them into a 400.
+ * first use (via the shared pino logger so it shows up in the same
+ * structured stream as everything else). No silent drops; unknown
+ * codes throw so the caller can turn them into a 400.
  */
 export function executorFor(language: Language | "python" | "cpp"): Executor {
   switch (language) {
@@ -39,22 +41,16 @@ export function executorFor(language: Language | "python" | "cpp"): Executor {
     case "python":
       if (!warnedLegacyPython) {
         warnedLegacyPython = true;
-        // Use console.warn here rather than the pino logger to avoid a
-        // circular dependency — the logger module is wired up by teammate
-        // A / C and may not be initialised when the first executor lookup
-        // happens during a health probe.
-        // eslint-disable-next-line no-console
-        console.warn(
-          '[judge] deprecation: language code "python" is legacy; map to "python3"'
+        logger.warn(
+          'deprecation: language code "python" is legacy; map to "python3"',
         );
       }
       return pythonExecutor;
     case "cpp":
       if (!warnedLegacyCpp) {
         warnedLegacyCpp = true;
-        // eslint-disable-next-line no-console
-        console.warn(
-          '[judge] deprecation: language code "cpp" is legacy; map to "cpp17"'
+        logger.warn(
+          'deprecation: language code "cpp" is legacy; map to "cpp17"',
         );
       }
       return cpp17Executor;
