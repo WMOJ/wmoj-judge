@@ -29,17 +29,5 @@
     "filename": "Main.cpp",
     "compile": { "argv": ["/usr/bin/g++", "-O2", "-std=c++23", "Main.cpp", "-o", "a.out"] },
     "run": { "argv": ["./a.out"] }
-  },
-  "java8": {
-    "filename": "<CLASS>.java",
-    "compile": { "argv": ["/usr/lib/jvm/temurin-8-jdk-amd64/bin/javac", "<CLASS>.java"] },
-    "run": { "argv": ["/usr/lib/jvm/temurin-8-jdk-amd64/bin/java", "-Xmx<MEM>m", "-XX:ReservedCodeCacheSize=64m", "-XX:MaxMetaspaceSize=128m", "-XX:CompressedClassSpaceSize=64m", "-classpath", ".", "<CLASS>"] },
-    "rlimitAsExtraMb": 1024
-  },
-  "java-latest": {
-    "filename": "<CLASS>.java",
-    "compile": { "argv": ["/usr/lib/jvm/temurin-25-jdk-amd64/bin/javac", "<CLASS>.java"] },
-    "run": { "argv": ["/usr/lib/jvm/temurin-25-jdk-amd64/bin/java", "-Xmx<MEM>m", "-XX:ReservedCodeCacheSize=64m", "-XX:MaxMetaspaceSize=128m", "-XX:CompressedClassSpaceSize=64m", "-classpath", ".", "<CLASS>"] },
-    "rlimitAsExtraMb": 1024
   }
 }

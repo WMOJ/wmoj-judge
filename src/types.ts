@@ -7,9 +7,7 @@ export type Language =
   | "cpp14"
   | "cpp17"
   | "cpp20"
-  | "cpp23"
-  | "java8"
-  | "java-latest";
+  | "cpp23";
 
 export type Verdict = "AC" | "WA" | "TLE" | "MLE" | "RE" | "CE" | "IE";
 
@@ -20,7 +18,7 @@ export type CompareMode =
   | "float-epsilon";
 
 export interface SubmitRequest {
-  language: Language | "python" | "cpp" | "java"; // legacy accepted during cutover
+  language: Language | "python" | "cpp"; // legacy accepted during cutover
   code: string;
   input: string[];
   output: string[];
@@ -51,7 +49,7 @@ export interface SubmitResponse {
 }
 
 export interface Executor {
-  filename(code: string): string; // resolves Java's <ClassName>.java
+  filename(code: string): string;
   prepare(workDir: string, code: string): Promise<void>;
   compile(
     workDir: string,
@@ -69,10 +67,7 @@ export interface SandboxOpts {
   /**
    * Optional override for the nsjail --rlimit_as VA-space cap. When set,
    * nsjail uses this value instead of `memLimitMb` for --rlimit_as.
-   * Clamped to `>= memLimitMb` inside nsjail.ts. Used for the JVM, which
-   * reserves ~1.2 GB of VA space at startup (CompressedClassSpace,
-   * ReservedCodeCache, metaspace) regardless of the effective heap; the
-   * user-visible memory cap is still enforced via `-Xmx<memLimitMb>m`.
+   * Clamped to `>= memLimitMb` inside nsjail.ts.
    */
   rlimitAsMb?: number;
   stdin: string;

@@ -57,16 +57,10 @@ RUN npm run build
 # ---------------------------------------------------------------------
 FROM node:20-trixie-slim AS runtime
 
-# Compilers and language runtimes for the 8-entry language matrix:
+# Compilers and language runtimes for the 6-entry language matrix:
 #   python3      -> /usr/bin/python3                (debian apt)
 #   pypy3        -> /usr/bin/pypy3                  (debian apt)
 #   cpp14/17/20/23 -> /usr/bin/g++                  (debian apt, gcc 14)
-#   java8        -> /usr/lib/jvm/temurin-8-jdk-amd64/bin/{java,javac}
-#   java-latest  -> /usr/lib/jvm/temurin-25-jdk-amd64/bin/{java,javac}
-#
-# JDKs come from the Eclipse Temurin apt repo (Adoptium); Debian's
-# default-jdk in trixie is 21 and Java 8 is not packaged at all, so
-# Temurin is the only supported source for both.
 #
 # Shared libs for nsjail at runtime: libprotobuf32t64 (trixie renamed
 # from libprotobuf32 during the 64-bit time_t transition), libnl-3-200,
@@ -74,25 +68,13 @@ FROM node:20-trixie-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
-        curl \
-        gnupg \
-    && install -d -m 0755 /etc/apt/keyrings \
-    && curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public \
-        | gpg --dearmor -o /etc/apt/keyrings/adoptium.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb trixie main" \
-        > /etc/apt/sources.list.d/adoptium.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
         python3 \
         pypy3 \
         g++ \
-        temurin-8-jdk \
-        temurin-25-jdk \
         libprotobuf32t64 \
         libnl-3-200 \
         libnl-route-3-200 \
         libcap2 \
-    && apt-get purge -y --auto-remove curl gnupg \
     && rm -rf /var/lib/apt/lists/*
 
 # nsjail binary from stage 1
@@ -116,18 +98,6 @@ RUN npm ci --omit=dev
 # Bring in the compiled TS and the static assets consumed at runtime.
 COPY --from=builder /app/dist ./dist
 COPY languages.json policy.kafel ./
-
-# JVM Class Data Sharing archive is intentionally omitted. The previous
-# image pre-generated /app/jvm-cds.jsa against OpenJDK 17, which
-# languages.json consumed via `-Xshare:on -XX:SharedArchiveFile=...`.
-# With OpenJDK 17 removed and two distinct Temurin JDKs installed
-# (8 and 25), a single shared archive is no longer valid — CDS dumps
-# are JDK-version-specific. Maintaining per-JDK archives adds build-
-# time dump commands and doubles the tuning surface for marginal judge
-# startup gain, so we drop CDS entirely. languages.json must invoke
-# `java` without any `-Xshare:on`/`-XX:SharedArchiveFile=` flags; each
-# JDK falls back to its own bundled default CDS archive
-# (lib/server/classes.jsa) automatically.
 
 # Run Node as the judge-1000 unprivileged user. This is REQUIRED on
 # Render-style unprivileged containers because nsjail's initNsFromChild

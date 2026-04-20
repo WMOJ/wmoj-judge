@@ -45,14 +45,9 @@ export async function runSandboxed(
   const cpuSec = cpuLimitSecFor(opts.timeLimitMs);
   // --rlimit_fsize is in MB per nsjail's docs; --rlimit_as is in MB.
   const memLimitMb = Math.max(1, Math.floor(opts.memLimitMb));
-  // --rlimit_as may be bumped above the user-visible memory cap for
-  // runtimes (notably the JVM) that reserve >1GB of VA space at
-  // startup even when the effective heap is much smaller. The caller
-  // is responsible for enforcing the user-visible limit via runtime
-  // flags such as `-Xmx<memLimit>m`. See the java-investigator writeup
-  // on VA-space reservation for CompressedClassSpace / ReservedCodeCache
-  // / metaspace; without the bump every Java launch aborts before the
-  // first user instruction runs.
+  // Optional caller override for --rlimit_as (VA space). Kept for
+  // future runtimes that need more virtual address space than the
+  // user-visible memory cap; currently unused by any language.
   const rlimitAsMb = opts.rlimitAsMb !== undefined
     ? Math.max(memLimitMb, Math.floor(opts.rlimitAsMb))
     : memLimitMb;
@@ -60,8 +55,8 @@ export async function runSandboxed(
   // No --chroot: Render's unprivileged containers do not grant
   // CAP_SYS_ADMIN, so we cannot bind-mount /usr, /lib, /etc/alternatives,
   // etc. into a per-submission chroot. Chrooting into just the workdir
-  // would hide the language runtimes (`/usr/bin/python3`, `/usr/bin/java`)
-  // from the child, breaking execve. We rely on:
+  // would hide the language runtimes (/usr/bin/python3, /usr/bin/g++
+  // shims, etc.) from the child, breaking execve. We rely on:
   //   - unprivileged pool UID (cannot read /app or other pool UIDs' workdirs)
   //   - 0700 workdir perms (cross-submission isolation)
   //   - seccomp allow-list (blocks network, ptrace, namespace ops, etc.)
@@ -101,12 +96,10 @@ export async function runSandboxed(
     "--cwd", opts.cwd,
     "--rlimit_as", String(rlimitAsMb),
     "--rlimit_cpu", String(cpuSec),
-    // JVMs are thread-heavy: GC workers, JIT compiler threads, signal
-    // dispatcher, finalizer, reference handler, plus user threads.
-    // 32 is too tight -- JDK 25 on a multi-core host can want 20+
-    // at startup alone. 256 is comfortable for the JVM and still far
-    // below anything a malicious submission could use for DoS given
-    // RLIMIT_AS / RLIMIT_CPU are also in effect.
+    // 256 is comfortable for multi-threaded runtimes (PyPy, any future
+    // thread-heavy language) and still far below anything a malicious
+    // submission could use for DoS given RLIMIT_AS / RLIMIT_CPU are
+    // also in effect.
     "--rlimit_nproc", "256",
     "--rlimit_nofile", "256",
     "--rlimit_fsize", "10",
@@ -123,10 +116,8 @@ export async function runSandboxed(
   ];
 
   // nsjail reads PATH/LANG/... from its own environment and forwards
-  // them to the jailed child via `--env <VAR>` (name-only form). No
-  // language-specific variables are needed (Temurin's `java` resolves
-  // lib/ via /proc/self/exe, so JAVA_HOME is unnecessary). Nothing
-  // else from the judge's own env leaks through.
+  // them to the jailed child via `--env <VAR>` (name-only form).
+  // Nothing else from the judge's own env leaks through.
   const jailEnv = buildChildEnv("python3");
 
   const started = Date.now();

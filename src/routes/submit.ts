@@ -22,18 +22,15 @@ import { logger } from "../util/logger";
 import { isDraining } from "../util/shutdown";
 import languagesJson from "../../languages.json";
 
-const ALL_LANGUAGES: readonly (Language | "python" | "cpp" | "java")[] = [
+const ALL_LANGUAGES: readonly (Language | "python" | "cpp")[] = [
   "python3",
   "pypy3",
   "cpp14",
   "cpp17",
   "cpp20",
   "cpp23",
-  "java8",
-  "java-latest",
   "python",
   "cpp",
-  "java",
 ];
 
 const ALL_COMPARE_MODES: readonly CompareMode[] = [
@@ -57,7 +54,7 @@ function validateSubmit(body: unknown): { ok: true; value: SubmitRequest } | { o
   if (typeof b.language !== "string") {
     return { ok: false, error: "Invalid payload: 'language' must be a string" };
   }
-  if (!ALL_LANGUAGES.includes(b.language as Language | "python" | "cpp" | "java")) {
+  if (!ALL_LANGUAGES.includes(b.language as Language | "python" | "cpp")) {
     return { ok: false, error: `Unsupported language: ${b.language}` };
   }
   if (typeof b.code !== "string") {
@@ -87,7 +84,7 @@ function validateSubmit(body: unknown): { ok: true; value: SubmitRequest } | { o
   return {
     ok: true,
     value: {
-      language: b.language as Language | "python" | "cpp" | "java",
+      language: b.language as Language | "python" | "cpp",
       code: b.code,
       input: b.input as string[],
       output: b.output as string[],
@@ -107,14 +104,12 @@ function validateSubmit(body: unknown): { ok: true; value: SubmitRequest } | { o
  * Legacy cutover mapping:
  *   "python" -> "python3"
  *   "cpp"    -> "cpp17"
- *   "java"   -> "java8"   (backfills pre-split submissions to OpenJDK 8)
  */
 function normalizeLanguage(
-  lang: Language | "python" | "cpp" | "java",
+  lang: Language | "python" | "cpp",
 ): Language {
   if (lang === "python") return "python3";
   if (lang === "cpp") return "cpp17";
-  if (lang === "java") return "java8";
   return lang;
 }
 
@@ -143,31 +138,6 @@ function compileArgvFor(language: Language): readonly string[] {
 function languageMemoryDefaultMb(language: Language): number | undefined {
   const spec = languagesJson[language] as { memoryLimitMb?: number };
   return typeof spec.memoryLimitMb === "number" ? spec.memoryLimitMb : undefined;
-}
-
-/**
- * Per-language extra VA-space headroom added on top of the effective
- * memoryLimitMb when computing nsjail's --rlimit_as. Used for the JVM,
- * which reserves ~1.2 GB of virtual address space at startup
- * (CompressedClassSpace, ReservedCodeCache, metaspace) regardless of
- * the working heap size. The user-visible memory cap is still enforced
- * via `-Xmx<memLimitMb>m` in the java run argv.
- */
-function languageRlimitAsExtraMb(language: Language): number {
-  const spec = languagesJson[language] as { rlimitAsExtraMb?: number };
-  return typeof spec.rlimitAsExtraMb === "number" ? spec.rlimitAsExtraMb : 0;
-}
-
-/**
- * Substitute the literal placeholder "<MEM>" in a run argv with the
- * effective memLimitMb. Used by the Java variants (languages.json sets
- * `-Xmx<MEM>m`) so the JVM heap cap tracks whatever memoryLimit the
- * submission asked for (or the language/judge default). Non-Java argvs
- * contain no "<MEM>" and pass through unchanged.
- */
-function substituteMemory(argv: readonly string[], memLimitMb: number): string[] {
-  const mem = String(memLimitMb);
-  return argv.map((a) => a.replace(/<MEM>/g, mem));
 }
 
 /**
@@ -242,8 +212,6 @@ submitRouter.post("/", async (req: Request, res: Response) => {
   // default (e.g. pypy3 → 384 MB) → global default 256 MB.
   const memLimitMb =
     payload.memoryLimit ?? languageMemoryDefaultMb(language) ?? 256;
-  // --rlimit_as bump (JVM needs ~1.2 GB VA-space regardless of heap).
-  const rlimitAsMb = memLimitMb + languageRlimitAsExtraMb(language);
 
   logger.info(
     {
@@ -252,7 +220,6 @@ submitRouter.post("/", async (req: Request, res: Response) => {
       cases: payload.input.length,
       timeLimitMs,
       memLimitMb,
-      rlimitAsMb,
       compareMode,
     },
     "submit: received",
@@ -276,11 +243,7 @@ submitRouter.post("/", async (req: Request, res: Response) => {
         logger.warn({ err, workDir }, "submit: chown tree failed; continuing");
       });
 
-      const runCmdRaw = executor.buildRunCommand(workDir, filename);
-      // Resolve "<MEM>" placeholders (used by java8 / java-latest argv
-      // in languages.json to pin `-Xmx<MEM>m`) against the effective
-      // memory limit. Non-Java argvs pass through unchanged.
-      const runCmd = { argv: substituteMemory(runCmdRaw.argv, memLimitMb) };
+      const runCmd = executor.buildRunCommand(workDir, filename);
 
       // Cache key covers (language, source, compile argv) per the plan.
       // Interpreted languages (python3/pypy3) have no compile step, so we
@@ -326,7 +289,6 @@ submitRouter.post("/", async (req: Request, res: Response) => {
             gid: uid as number,
             timeLimitMs,
             memLimitMb,
-            rlimitAsMb,
             stdin,
           });
           const passed =
