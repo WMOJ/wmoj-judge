@@ -46,6 +46,18 @@ export async function runSandboxed(
   // --rlimit_fsize is in MB per nsjail's docs; --rlimit_as is in MB.
   const memLimitMb = Math.max(1, Math.floor(opts.memLimitMb));
 
+  // No --chroot: Render's unprivileged containers do not grant
+  // CAP_SYS_ADMIN, so we cannot bind-mount /usr, /lib, /etc/alternatives,
+  // etc. into a per-submission chroot. Chrooting into just the workdir
+  // would hide the language runtimes (`/usr/bin/python3`, `/usr/bin/java`)
+  // from the child, breaking execve. We rely on:
+  //   - unprivileged pool UID (cannot read /app or other pool UIDs' workdirs)
+  //   - 0700 workdir perms (cross-submission isolation)
+  //   - seccomp allow-list (blocks network, ptrace, namespace ops, etc.)
+  //   - --disable_clone_new* (prevents any new namespaces)
+  //   - kernel rlimits (memory / cpu / procs / files)
+  // `opts.chrootDir` is accepted in the type for forward-compat but
+  // ignored here until the runtime platform supports bind-mounting.
   const argv: string[] = [
     "--mode", "o",
     "--disable_clone_newuser",
@@ -55,8 +67,7 @@ export async function runSandboxed(
     "--disable_clone_newipc",
     "--disable_clone_newuts",
     "--disable_clone_newcgroup",
-    "--chroot", opts.chrootDir ?? opts.cwd,
-    "--cwd", "/",
+    "--cwd", opts.cwd,
     "--user", String(opts.uid),
     "--group", String(opts.gid),
     "--rlimit_as", String(memLimitMb),

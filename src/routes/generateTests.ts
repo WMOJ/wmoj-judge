@@ -114,13 +114,12 @@ generateTestsRouter.post("/", async (req: Request, res: Response) => {
 
     const sandboxRes = await runSandboxed({
       argv: ["./gen.out"],
-      cwd: "/",
+      cwd: workDir,
       uid,
       gid: uid,
       timeLimitMs: GENERATOR_TIME_LIMIT_MS,
       memLimitMb: GENERATOR_MEM_LIMIT_MB,
       stdin: "",
-      chrootDir: workDir,
     });
 
     if (sandboxRes.exitCode !== 0 || sandboxRes.killedBy !== null) {

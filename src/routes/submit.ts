@@ -279,13 +279,12 @@ submitRouter.post("/", async (req: Request, res: Response) => {
           const expected = payload.output[i] ?? "";
           const sandboxRes = await runSandboxed({
             argv: runCmd.argv,
-            cwd: "/",
+            cwd: workDir as string,
             uid: uid as number,
             gid: uid as number,
             timeLimitMs,
             memLimitMb,
             stdin,
-            chrootDir: workDir as string,
           });
           const passed =
             sandboxRes.exitCode === 0 &&
