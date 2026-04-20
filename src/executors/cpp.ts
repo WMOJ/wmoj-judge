@@ -5,14 +5,16 @@ import type { Executor, Language } from "../types";
 import languages from "../../languages.json";
 import { buildChildEnv } from "../sandbox/minimalEnv";
 
-type CppStandard = "cpp14" | "cpp17";
+type CppStandard = "cpp14" | "cpp17" | "cpp20" | "cpp23";
 
 /**
- * Build a C++ executor bound to a specific standard (c++14 or c++17).
+ * Build a C++ executor bound to a specific standard (c++14, c++17,
+ * c++20, or c++23).
  *
  * The language code for legacy "cpp" submissions is mapped to cpp17 inside
  * executors/index.ts — this module is standards-agnostic and reads the
- * correct compile/run argv from languages.json.
+ * correct compile/run argv (including the `-std=c++<N>` flag) from
+ * languages.json.
  *
  * Compilation is trusted: we run g++ OUTSIDE nsjail because it is the
  * judge transforming source, not executing user-provided behaviour. The

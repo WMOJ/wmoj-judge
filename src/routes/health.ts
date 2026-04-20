@@ -23,7 +23,11 @@ const PROBES: Probe[] = [
   { name: "python3", cmd: "python3", args: ["-V"], envLang: "python3" },
   { name: "pypy3", cmd: "pypy3", args: ["--version"], envLang: "pypy3" },
   { name: "g++", cmd: "g++", args: ["--version"], envLang: "cpp17" },
-  { name: "java", cmd: "java", args: ["-version"], envLang: "java" },
+  // Absolute Temurin paths so each JDK is probed independently (the
+  // `java` on PATH only resolves to one via update-alternatives, and
+  // silently probing the "wrong" JDK would mask the other being broken).
+  { name: "java8", cmd: "/usr/lib/jvm/temurin-8-jdk-amd64/bin/java", args: ["-version"], envLang: "java8" },
+  { name: "java-latest", cmd: "/usr/lib/jvm/temurin-25-jdk-amd64/bin/java", args: ["-version"], envLang: "java-latest" },
 ];
 
 const CACHE_TTL_MS = 30_000;

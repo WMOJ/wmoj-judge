@@ -45,6 +45,17 @@ export async function runSandboxed(
   const cpuSec = cpuLimitSecFor(opts.timeLimitMs);
   // --rlimit_fsize is in MB per nsjail's docs; --rlimit_as is in MB.
   const memLimitMb = Math.max(1, Math.floor(opts.memLimitMb));
+  // --rlimit_as may be bumped above the user-visible memory cap for
+  // runtimes (notably the JVM) that reserve >1GB of VA space at
+  // startup even when the effective heap is much smaller. The caller
+  // is responsible for enforcing the user-visible limit via runtime
+  // flags such as `-Xmx<memLimit>m`. See the java-investigator writeup
+  // on VA-space reservation for CompressedClassSpace / ReservedCodeCache
+  // / metaspace; without the bump every Java launch aborts before the
+  // first user instruction runs.
+  const rlimitAsMb = opts.rlimitAsMb !== undefined
+    ? Math.max(memLimitMb, Math.floor(opts.rlimitAsMb))
+    : memLimitMb;
 
   // No --chroot: Render's unprivileged containers do not grant
   // CAP_SYS_ADMIN, so we cannot bind-mount /usr, /lib, /etc/alternatives,
@@ -88,7 +99,7 @@ export async function runSandboxed(
     // no-new-privs, with the full seccomp allow-list and rlimits.
     "--keep_caps",
     "--cwd", opts.cwd,
-    "--rlimit_as", String(memLimitMb),
+    "--rlimit_as", String(rlimitAsMb),
     "--rlimit_cpu", String(cpuSec),
     "--rlimit_nproc", "32",
     "--rlimit_nofile", "64",
@@ -99,7 +110,6 @@ export async function runSandboxed(
     "--env", "LANG",
     "--env", "LC_ALL",
     "--env", "PYTHONUNBUFFERED",
-    "--env", "JAVA_HOME",
     "--time_limit", String(cpuSec),
     "--log_fd", "2",
     "--",
@@ -107,11 +117,11 @@ export async function runSandboxed(
   ];
 
   // nsjail reads PATH/LANG/... from its own environment and forwards
-  // them to the jailed child via `--env <VAR>` (name-only form). Use
-  // buildChildEnv("java") so JAVA_HOME is present when the child argv
-  // is the JVM; harmless for non-Java children since they don't read
-  // JAVA_HOME. Nothing else from the judge's own env leaks through.
-  const jailEnv = buildChildEnv("java");
+  // them to the jailed child via `--env <VAR>` (name-only form). No
+  // language-specific variables are needed (Temurin's `java` resolves
+  // lib/ via /proc/self/exe, so JAVA_HOME is unnecessary). Nothing
+  // else from the judge's own env leaks through.
+  const jailEnv = buildChildEnv("python3");
 
   const started = Date.now();
   const child = spawn(config.NSJAIL_BIN, argv, {

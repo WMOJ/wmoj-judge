@@ -4,16 +4,21 @@
 #
 # Stages:
 #   1. nsjail-builder : clone and build nsjail from source (not in
-#                       Debian bullseye apt repos).
+#                       Debian apt repos).
 #   2. builder        : install dev deps and compile TypeScript -> dist.
 #   3. runtime        : install toolchain + runtime deps, copy dist,
-#                       create the unprivileged UID pool, pre-generate
-#                       the JVM CDS archive, lock down /app perms.
+#                       create the unprivileged UID pool, lock down
+#                       /app perms.
+#
+# Base image: node:20-trixie-slim (Debian 13). Trixie ships g++ 14.2,
+# which has complete -std=c++23 support — required for the cpp23
+# language target. Bullseye (g++ 10) and bookworm (g++ 12) only cover
+# a partial set of C++23 features, so they are insufficient here.
 
 # ---------------------------------------------------------------------
 # Stage 1: build nsjail from source
 # ---------------------------------------------------------------------
-FROM debian:bullseye-slim AS nsjail-builder
+FROM debian:trixie-slim AS nsjail-builder
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -37,7 +42,7 @@ RUN git clone --depth=1 --branch 3.3 https://github.com/google/nsjail.git \
 # ---------------------------------------------------------------------
 # Stage 2: compile TypeScript
 # ---------------------------------------------------------------------
-FROM node:20-bullseye AS builder
+FROM node:20-trixie AS builder
 
 WORKDIR /app
 COPY package*.json tsconfig.json ./
@@ -50,23 +55,44 @@ RUN npm run build
 # ---------------------------------------------------------------------
 # Stage 3: runtime image
 # ---------------------------------------------------------------------
-FROM node:20-bullseye AS runtime
+FROM node:20-trixie-slim AS runtime
 
-# Compilers and language runtimes for the 5 supported languages plus
-# the shared libs nsjail needs at run time (libprotobuf, libnl-3,
-# libnl-route-3, libcap).
+# Compilers and language runtimes for the 8-entry language matrix:
+#   python3      -> /usr/bin/python3                (debian apt)
+#   pypy3        -> /usr/bin/pypy3                  (debian apt)
+#   cpp14/17/20/23 -> /usr/bin/g++                  (debian apt, gcc 14)
+#   java8        -> /usr/lib/jvm/temurin-8-jdk-amd64/bin/{java,javac}
+#   java-latest  -> /usr/lib/jvm/temurin-25-jdk-amd64/bin/{java,javac}
+#
+# JDKs come from the Eclipse Temurin apt repo (Adoptium); Debian's
+# default-jdk in trixie is 21 and Java 8 is not packaged at all, so
+# Temurin is the only supported source for both.
+#
+# Shared libs for nsjail at runtime: libprotobuf32t64 (trixie renamed
+# from libprotobuf32 during the 64-bit time_t transition), libnl-3-200,
+# libnl-route-3-200, libcap2.
 RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gnupg \
+    && install -d -m 0755 /etc/apt/keyrings \
+    && curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public \
+        | gpg --dearmor -o /etc/apt/keyrings/adoptium.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb trixie main" \
+        > /etc/apt/sources.list.d/adoptium.list \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         python3 \
         pypy3 \
         g++ \
-        openjdk-17-jdk-headless \
-        openjdk-17-jre-headless \
-        libprotobuf23 \
+        temurin-8-jdk \
+        temurin-25-jdk \
+        libprotobuf32t64 \
         libnl-3-200 \
         libnl-route-3-200 \
         libcap2 \
-        ca-certificates \
+    && apt-get purge -y --auto-remove curl gnupg \
     && rm -rf /var/lib/apt/lists/*
 
 # nsjail binary from stage 1
@@ -91,14 +117,17 @@ RUN npm ci --omit=dev
 COPY --from=builder /app/dist ./dist
 COPY languages.json policy.kafel ./
 
-# Pre-generate the JVM Class Data Sharing archive. Faster Java cold
-# starts AND required -- languages.json runs `java -Xshare:on
-# -XX:SharedArchiveFile=/app/jvm-cds.jsa`, which would fail at judge
-# time if this archive is missing. Fail the build loudly if the dump
-# cannot be produced; a silent fallback here makes every Java
-# submission break at runtime with a confusing error.
-RUN java -Xshare:dump -XX:SharedArchiveFile=/app/jvm-cds.jsa \
-        > /tmp/cds.log 2>&1
+# JVM Class Data Sharing archive is intentionally omitted. The previous
+# image pre-generated /app/jvm-cds.jsa against OpenJDK 17, which
+# languages.json consumed via `-Xshare:on -XX:SharedArchiveFile=...`.
+# With OpenJDK 17 removed and two distinct Temurin JDKs installed
+# (8 and 25), a single shared archive is no longer valid — CDS dumps
+# are JDK-version-specific. Maintaining per-JDK archives adds build-
+# time dump commands and doubles the tuning surface for marginal judge
+# startup gain, so we drop CDS entirely. languages.json must invoke
+# `java` without any `-Xshare:on`/`-XX:SharedArchiveFile=` flags; each
+# JDK falls back to its own bundled default CDS archive
+# (lib/server/classes.jsa) automatically.
 
 # Run Node as the judge-1000 unprivileged user. This is REQUIRED on
 # Render-style unprivileged containers because nsjail's initNsFromChild

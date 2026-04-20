@@ -1,7 +1,15 @@
 // Shared types for wmoj-judge. Interfaces here are frozen per the plan's
 // "Module boundaries" contract — A, B, C all import from this file.
 
-export type Language = "python3" | "pypy3" | "cpp14" | "cpp17" | "java";
+export type Language =
+  | "python3"
+  | "pypy3"
+  | "cpp14"
+  | "cpp17"
+  | "cpp20"
+  | "cpp23"
+  | "java8"
+  | "java-latest";
 
 export type Verdict = "AC" | "WA" | "TLE" | "MLE" | "RE" | "CE" | "IE";
 
@@ -12,7 +20,7 @@ export type CompareMode =
   | "float-epsilon";
 
 export interface SubmitRequest {
-  language: Language | "python" | "cpp"; // legacy accepted during cutover
+  language: Language | "python" | "cpp" | "java"; // legacy accepted during cutover
   code: string;
   input: string[];
   output: string[];
@@ -58,6 +66,15 @@ export interface SandboxOpts {
   gid: number;
   timeLimitMs: number;
   memLimitMb: number;
+  /**
+   * Optional override for the nsjail --rlimit_as VA-space cap. When set,
+   * nsjail uses this value instead of `memLimitMb` for --rlimit_as.
+   * Clamped to `>= memLimitMb` inside nsjail.ts. Used for the JVM, which
+   * reserves ~1.2 GB of VA space at startup (CompressedClassSpace,
+   * ReservedCodeCache, metaspace) regardless of the effective heap; the
+   * user-visible memory cap is still enforced via `-Xmx<memLimitMb>m`.
+   */
+  rlimitAsMb?: number;
   stdin: string;
   chrootDir?: string;
 }

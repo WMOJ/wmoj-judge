@@ -7,7 +7,8 @@
   "pypy3": {
     "filename": "Main.py",
     "compile": null,
-    "run": { "argv": ["/usr/bin/pypy3", "-u", "Main.py"] }
+    "run": { "argv": ["/usr/bin/pypy3", "-u", "Main.py"] },
+    "memoryLimitMb": 384
   },
   "cpp14": {
     "filename": "Main.cpp",
@@ -19,9 +20,26 @@
     "compile": { "argv": ["/usr/bin/g++", "-O2", "-std=c++17", "Main.cpp", "-o", "a.out"] },
     "run": { "argv": ["./a.out"] }
   },
-  "java": {
+  "cpp20": {
+    "filename": "Main.cpp",
+    "compile": { "argv": ["/usr/bin/g++", "-O2", "-std=c++20", "Main.cpp", "-o", "a.out"] },
+    "run": { "argv": ["./a.out"] }
+  },
+  "cpp23": {
+    "filename": "Main.cpp",
+    "compile": { "argv": ["/usr/bin/g++", "-O2", "-std=c++23", "Main.cpp", "-o", "a.out"] },
+    "run": { "argv": ["./a.out"] }
+  },
+  "java8": {
     "filename": "<CLASS>.java",
-    "compile": { "argv": ["/usr/bin/javac", "<CLASS>.java"] },
-    "run": { "argv": ["/usr/bin/java", "-Xshare:on", "-XX:SharedArchiveFile=/app/jvm-cds.jsa", "-classpath", ".", "<CLASS>"] }
+    "compile": { "argv": ["/usr/lib/jvm/temurin-8-jdk-amd64/bin/javac", "<CLASS>.java"] },
+    "run": { "argv": ["/usr/lib/jvm/temurin-8-jdk-amd64/bin/java", "-Xmx<MEM>m", "-XX:ReservedCodeCacheSize=64m", "-XX:MaxMetaspaceSize=128m", "-XX:CompressedClassSpaceSize=64m", "-classpath", ".", "<CLASS>"] },
+    "rlimitAsExtraMb": 1024
+  },
+  "java-latest": {
+    "filename": "<CLASS>.java",
+    "compile": { "argv": ["/usr/lib/jvm/temurin-25-jdk-amd64/bin/javac", "<CLASS>.java"] },
+    "run": { "argv": ["/usr/lib/jvm/temurin-25-jdk-amd64/bin/java", "-Xmx<MEM>m", "-XX:ReservedCodeCacheSize=64m", "-XX:MaxMetaspaceSize=128m", "-XX:CompressedClassSpaceSize=64m", "-classpath", ".", "<CLASS>"] },
+    "rlimitAsExtraMb": 1024
   }
 }

@@ -5,7 +5,7 @@ import type { Executor } from "../types";
 import languages from "../../languages.json";
 import { buildChildEnv } from "../sandbox/minimalEnv";
 
-const SPEC = languages.java;
+type JavaVariant = "java8" | "java-latest";
 
 /**
  * Detect the declared public class name in Java source so the file can be
@@ -15,6 +15,9 @@ const SPEC = languages.java;
  * `final public class Foo`. We pick the FIRST match; if no `public` class
  * is declared we fall back to "Main" so the program still compiles when
  * the user wrote a single default-visibility class named Main.
+ *
+ * Class-name detection is version-agnostic — the same regex works for
+ * java8 and java-latest sources; only the javac/java binaries differ.
  */
 export function detectJavaClassName(code: string): string {
   // Covers: `public class X`, `public final class X`, `public  class X`, etc.
@@ -40,33 +43,42 @@ function substClass(argv: readonly string[], className: string): string[] {
   return argv.map((a) => a.replace(/<CLASS>/g, className));
 }
 
-export const javaExecutor: Executor = {
-  filename(code: string): string {
-    return `${detectJavaClassName(code)}.java`;
-  },
+/**
+ * Build a Java executor bound to a specific variant (java8 or
+ * java-latest). Each variant picks up its own javac + java binary paths
+ * from languages.json; class-name detection is shared.
+ */
+export function createJavaExecutor(variant: JavaVariant): Executor {
+  const spec = languages[variant];
 
-  async prepare(workDir: string, code: string): Promise<void> {
-    const fname = this.filename(code);
-    await fs.writeFile(path.join(workDir, fname), code, "utf8");
-  },
+  return {
+    filename(code: string): string {
+      return `${detectJavaClassName(code)}.java`;
+    },
 
-  async compile(
-    workDir: string
-  ): Promise<{ ok: true } | { ok: false; stderr: string }> {
-    // Re-derive the class name from the source we just wrote. Reading the
-    // file back guarantees we use exactly the bytes on disk; alternatives
-    // (caching through the Executor object) would leak state across calls.
-    const className = await detectClassNameFromWorkdir(workDir);
-    const argv = substClass(SPEC.compile.argv, className);
-    return runCompile(argv, workDir, buildChildEnv("java"));
-  },
+    async prepare(workDir: string, code: string): Promise<void> {
+      const fname = this.filename(code);
+      await fs.writeFile(path.join(workDir, fname), code, "utf8");
+    },
 
-  buildRunCommand(_workDir: string, filename: string): { argv: string[] } {
-    // filename is "<ClassName>.java" as returned by filename(code).
-    const className = filename.replace(/\.java$/, "");
-    return { argv: substClass(SPEC.run.argv, className) };
-  },
-};
+    async compile(
+      workDir: string
+    ): Promise<{ ok: true } | { ok: false; stderr: string }> {
+      // Re-derive the class name from the source we just wrote. Reading the
+      // file back guarantees we use exactly the bytes on disk; alternatives
+      // (caching through the Executor object) would leak state across calls.
+      const className = await detectClassNameFromWorkdir(workDir);
+      const argv = substClass(spec.compile.argv, className);
+      return runCompile(argv, workDir, buildChildEnv(variant));
+    },
+
+    buildRunCommand(_workDir: string, filename: string): { argv: string[] } {
+      // filename is "<ClassName>.java" as returned by filename(code).
+      const className = filename.replace(/\.java$/, "");
+      return { argv: substClass(spec.run.argv, className) };
+    },
+  };
+}
 
 async function detectClassNameFromWorkdir(workDir: string): Promise<string> {
   const entries = await fs.readdir(workDir);
