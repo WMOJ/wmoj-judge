@@ -158,6 +158,28 @@ export async function runSandboxed(
     memLimitMb: opts.memLimitMb,
   });
 
+  // Diagnostic logging: when a sandbox run produced no stdout AND the
+  // exit code suggests a setup failure (nsjail returns 255 when it
+  // couldn't set up the jail or exec the child), emit the raw nsjail
+  // stderr so we can see the actual failure reason in Render logs.
+  // `stripNsjailLogLines` in the client response intentionally hides
+  // nsjail's `[...]` lines from the user; we surface them here for ops.
+  if (stdout.length === 0 && (code === 255 || code === 1 || code === null)) {
+    logger.warn(
+      {
+        exitCode: code,
+        signal,
+        killedBy,
+        argv: opts.argv,
+        cwd: opts.cwd,
+        uid: opts.uid,
+        wallMs,
+        nsjailRaw: stderrRaw.slice(0, 2000),
+      },
+      "sandbox: empty stdout with non-clean exit — raw nsjail diagnostics follow",
+    );
+  }
+
   return {
     exitCode: code,
     timedOut: killedBy === "TO",
