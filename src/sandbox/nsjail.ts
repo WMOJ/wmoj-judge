@@ -67,6 +67,14 @@ export async function runSandboxed(
     "--disable_clone_newipc",
     "--disable_clone_newuts",
     "--disable_clone_newcgroup",
+    // --keep_caps skips nsjail's prctl(PR_SET_SECUREBITS,
+    // SECBIT_KEEP_CAPS | SECBIT_NO_SETUID_FIXUP), which requires
+    // CAP_SETPCAP and is denied on Render's unprivileged containers
+    // ("Operation not permitted"). We then setuid from root to the
+    // pool UID 1000 below via --user; the Linux kernel drops ALL
+    // capabilities automatically when root setuids to a non-root UID,
+    // so the child ends up unprivileged regardless of this flag name.
+    "--keep_caps",
     "--cwd", opts.cwd,
     "--user", String(opts.uid),
     "--group", String(opts.gid),
