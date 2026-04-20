@@ -1,0 +1,201 @@
+// wmoj-judge unified seccomp policy (Kafel) — amd64 (Render target)
+//
+// Covers Python 3, PyPy 3, compiled C++ binaries, and the JVM. One
+// policy for all five languages.
+//
+// Strategy: strict allow-list. Anything not listed is killed by
+// the DEFAULT KILL action. This subsumes the previously-explicit deny
+// list — dangerous syscalls (socket family, ptrace, process_vm_*,
+// mount, pivot_root, reboot, kexec_*, *_module, bpf, unshare, setns,
+// namespace-tagged clone, clone3) are denied by virtue of not being
+// in the allow-list.
+//
+// References: DMOJ's executor seccomp, Judge0's isolate policy,
+// nsjail's bundled example configs.
+
+POLICY wmoj_judge {
+  ALLOW {
+    // ---- Process lifecycle ----
+    exit,
+    exit_group,
+    rt_sigreturn,
+    rt_sigaction,
+    rt_sigprocmask,
+    rt_sigpending,
+    rt_sigsuspend,
+    rt_sigqueueinfo,
+    rt_tgsigqueueinfo,
+    sigaltstack,
+    tgkill,
+    tkill,
+    kill,
+    getpid,
+    gettid,
+    getppid,
+    getuid,
+    geteuid,
+    getgid,
+    getegid,
+    getpgid,
+    getsid,
+    getresuid,
+    getresgid,
+    set_tid_address,
+    set_robust_list,
+    get_robust_list,
+    prctl,
+    arch_prctl,
+    capget,
+    sched_yield,
+    sched_getaffinity,
+    sched_setaffinity,
+    sched_getparam,
+    sched_getscheduler,
+    sched_get_priority_max,
+    sched_get_priority_min,
+
+    // clone is allowed only with no CLONE_NEW* flags. Mask covers all
+    // CLONE_NEWNS/UTS/IPC/USER/PID/NET/CGROUP bits (0x7E020000).
+    // clone3 is not listed -> killed by default.
+    clone { (clone_flags & 0x7E020000) == 0 },
+
+    wait4,
+    waitid,
+    pause,
+    nanosleep,
+    clock_nanosleep,
+    futex,
+    membarrier,
+
+    // ---- Time ----
+    clock_gettime,
+    clock_getres,
+    gettimeofday,
+    time,
+    times,
+
+    // ---- Memory ----
+    brk,
+    mmap,
+    mremap,
+    munmap,
+    mprotect,
+    madvise,
+    mlock,
+    munlock,
+    mlockall,
+    munlockall,
+    msync,
+
+    // ---- File I/O ----
+    read,
+    pread64,
+    readv,
+    preadv,
+    preadv2,
+    write,
+    pwrite64,
+    writev,
+    pwritev,
+    pwritev2,
+    open,
+    openat,
+    close,
+    // On amd64 Kafel calls these newstat / newfstat / newlstat / newuname.
+    newstat,
+    newfstat,
+    newlstat,
+    newfstatat,
+    access,
+    faccessat,
+    lseek,
+    fsync,
+    fdatasync,
+    sync_file_range,
+    readahead,
+    pipe,
+    pipe2,
+    dup,
+    dup2,
+    dup3,
+    fcntl,
+    flock,
+    truncate,
+    ftruncate,
+    getdents,
+    getdents64,
+    getcwd,
+    chdir,
+    fchdir,
+    readlink,
+    readlinkat,
+    unlink,
+    unlinkat,
+    rename,
+    renameat,
+    renameat2,
+    mkdir,
+    mkdirat,
+    rmdir,
+    chmod,
+    fchmod,
+    fchmodat,
+    chown,
+    fchown,
+    fchownat,
+    lchown,
+    umask,
+
+    // Narrow ioctl allow-list for TTY queries and FD_CLOEXEC helpers
+    // used by the JVM and Python runtimes. TCGETS=0x5401,
+    // FIOCLEX=0x5451, FIONCLEX=0x5450, FIONREAD=0x541B,
+    // TIOCGWINSZ=0x5413, TIOCGPGRP=0x540F.
+    ioctl {
+      cmd == 0x5401 || cmd == 0x5451 || cmd == 0x5450 ||
+      cmd == 0x541B || cmd == 0x5413 || cmd == 0x540F
+    },
+
+    // ---- Process info / resource reporting ----
+    getrusage,
+    getrlimit,
+    prlimit64,
+    setrlimit,
+    sysinfo,
+    newuname,
+
+    // ---- Randomness ----
+    getrandom,
+
+    // ---- Polling / event loops (JVM, PyPy, glibc) ----
+    poll,
+    ppoll,
+    select,
+    pselect6,
+    epoll_create,
+    epoll_create1,
+    epoll_wait,
+    epoll_pwait,
+    epoll_ctl,
+    eventfd,
+    eventfd2,
+    timerfd_create,
+    timerfd_gettime,
+    timerfd_settime,
+
+    // ---- Shared memory — JVM uses memfd_create for CDS ----
+    memfd_create,
+
+    // ---- Extended attributes ----
+    getxattr,
+    lgetxattr,
+    fgetxattr,
+    listxattr,
+    llistxattr,
+    flistxattr,
+
+    // ---- Restart interrupted syscalls (glibc) ----
+    restart_syscall
+  }
+}
+
+USE wmoj_judge DEFAULT KILL

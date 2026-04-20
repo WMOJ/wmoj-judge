@@ -1,0 +1,27 @@
+{
+  "python3": {
+    "filename": "Main.py",
+    "compile": null,
+    "run": { "argv": ["/usr/bin/python3", "-u", "Main.py"] }
+  },
+  "pypy3": {
+    "filename": "Main.py",
+    "compile": null,
+    "run": { "argv": ["/usr/bin/pypy3", "-u", "Main.py"] }
+  },
+  "cpp14": {
+    "filename": "Main.cpp",
+    "compile": { "argv": ["/usr/bin/g++", "-O2", "-std=c++14", "Main.cpp", "-o", "a.out"] },
+    "run": { "argv": ["./a.out"] }
+  },
+  "cpp17": {
+    "filename": "Main.cpp",
+    "compile": { "argv": ["/usr/bin/g++", "-O2", "-std=c++17", "Main.cpp", "-o", "a.out"] },
+    "run": { "argv": ["./a.out"] }
+  },
+  "java": {
+    "filename": "<CLASS>.java",
+    "compile": { "argv": ["/usr/bin/javac", "<CLASS>.java"] },
+    "run": { "argv": ["/usr/bin/java", "-Xshare:on", "-XX:SharedArchiveFile=/app/jvm-cds.jsa", "-classpath", ".", "<CLASS>"] }
+  }
+}

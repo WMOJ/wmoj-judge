@@ -1,0 +1,338 @@
+import { Router, type Request, type Response } from "express";
+import { promises as fs } from "fs";
+import type {
+  SubmitRequest,
+  SubmitResponse,
+  TestResult,
+  CompareMode,
+  Language,
+  Verdict,
+  SandboxResult,
+} from "../types";
+import { config } from "../config";
+import { submitSemaphore } from "../queue/globalSemaphore";
+import { createPool } from "../queue/workerPool";
+import { compileCache, cacheKey } from "../cache/compileCache";
+import { runSandboxed } from "../sandbox/nsjail";
+import { acquireUid, releaseUid } from "../queue/uidPoolSingleton";
+import { createWorkdir, cleanupWorkdir } from "../util/workdir";
+import { executorFor } from "../executors";
+import { compare } from "../compare";
+import { logger } from "../util/logger";
+import { isDraining } from "../util/shutdown";
+import languagesJson from "../../languages.json";
+
+const ALL_LANGUAGES: readonly (Language | "python" | "cpp")[] = [
+  "python3",
+  "pypy3",
+  "cpp14",
+  "cpp17",
+  "java",
+  "python",
+  "cpp",
+];
+
+const ALL_COMPARE_MODES: readonly CompareMode[] = [
+  "exact",
+  "trim-trailing",
+  "whitespace",
+  "float-epsilon",
+];
+
+/**
+ * Shape-check a /submit payload. Returns a validated SubmitRequest or
+ * an error message. No field coercion happens here — the body must
+ * already match the contract.
+ */
+function validateSubmit(body: unknown): { ok: true; value: SubmitRequest } | { ok: false; error: string } {
+  if (!body || typeof body !== "object") {
+    return { ok: false, error: "Invalid payload: body must be an object" };
+  }
+  const b = body as Record<string, unknown>;
+
+  if (typeof b.language !== "string") {
+    return { ok: false, error: "Invalid payload: 'language' must be a string" };
+  }
+  if (!ALL_LANGUAGES.includes(b.language as Language | "python" | "cpp")) {
+    return { ok: false, error: `Unsupported language: ${b.language}` };
+  }
+  if (typeof b.code !== "string") {
+    return { ok: false, error: "Invalid payload: 'code' must be a string" };
+  }
+  if (!Array.isArray(b.input) || !b.input.every((x) => typeof x === "string")) {
+    return { ok: false, error: "Invalid payload: 'input' must be string[]" };
+  }
+  if (!Array.isArray(b.output) || !b.output.every((x) => typeof x === "string")) {
+    return { ok: false, error: "Invalid payload: 'output' must be string[]" };
+  }
+  if (b.input.length !== b.output.length) {
+    return { ok: false, error: "'input' and 'output' arrays must be the same length" };
+  }
+  if (b.timeLimit !== undefined && (typeof b.timeLimit !== "number" || !Number.isFinite(b.timeLimit) || b.timeLimit <= 0)) {
+    return { ok: false, error: "'timeLimit' must be a positive number (ms)" };
+  }
+  if (b.memoryLimit !== undefined && (typeof b.memoryLimit !== "number" || !Number.isFinite(b.memoryLimit) || b.memoryLimit <= 0)) {
+    return { ok: false, error: "'memoryLimit' must be a positive number (MB)" };
+  }
+  if (b.compareMode !== undefined) {
+    if (typeof b.compareMode !== "string" || !ALL_COMPARE_MODES.includes(b.compareMode as CompareMode)) {
+      return { ok: false, error: `'compareMode' must be one of ${ALL_COMPARE_MODES.join(", ")}` };
+    }
+  }
+
+  return {
+    ok: true,
+    value: {
+      language: b.language as Language | "python" | "cpp",
+      code: b.code,
+      input: b.input as string[],
+      output: b.output as string[],
+      timeLimit: b.timeLimit as number | undefined,
+      memoryLimit: b.memoryLimit as number | undefined,
+      compareMode: b.compareMode as CompareMode | undefined,
+    },
+  };
+}
+
+/**
+ * Map a legacy language code to its current equivalent. Logs a
+ * deprecation warning the first time in-process each legacy code is
+ * seen; still accepted for the cutover window.
+ */
+const legacyWarned = new Set<string>();
+
+function normalizeLanguage(lang: Language | "python" | "cpp"): Language {
+  if (lang === "python") {
+    if (!legacyWarned.has("python")) {
+      legacyWarned.add("python");
+      logger.warn(
+        "legacy language code 'python' received; mapping to 'python3'. Update the client.",
+      );
+    }
+    return "python3";
+  }
+  if (lang === "cpp") {
+    if (!legacyWarned.has("cpp")) {
+      legacyWarned.add("cpp");
+      logger.warn(
+        "legacy language code 'cpp' received; mapping to 'cpp17'. Update the client.",
+      );
+    }
+    return "cpp17";
+  }
+  return lang;
+}
+
+/**
+ * Return the compile argv for a canonical language, or an empty array for
+ * interpreted languages (python3, pypy3) which have no compile step. Used
+ * as input to the compile-cache key so artifacts are invalidated whenever
+ * compiler flags change — and so python/pypy submissions with identical
+ * source share a cache entry.
+ */
+function compileArgvFor(language: Language): readonly string[] {
+  const spec = languagesJson[language];
+  if (spec && spec.compile && Array.isArray(spec.compile.argv)) {
+    return spec.compile.argv;
+  }
+  return [];
+}
+
+/**
+ * Derive the competitive-programming verdict from a sandbox result
+ * plus the compare() outcome. Exhaustive per the plan.
+ */
+function deriveVerdict(sb: SandboxResult, passed: boolean): Verdict {
+  if (sb.killedBy === "TO") return "TLE";
+  if (sb.killedBy === "OOM") return "MLE";
+  if (sb.exitCode !== 0 || sb.killedBy === "SIG") return "RE";
+  return passed ? "AC" : "WA";
+}
+
+/**
+ * Build the TestResult for one test case from the sandbox result.
+ * Centralizes the "shape" of a result so it can't drift between cases.
+ */
+function buildResult(
+  index: number,
+  expected: string,
+  sb: SandboxResult,
+  passed: boolean,
+  verdict: Verdict,
+): TestResult {
+  return {
+    index,
+    exitCode: sb.exitCode,
+    passed,
+    expected,
+    received: sb.stdout,
+    stderr: sb.stderr,
+    stdout: sb.stdout,
+    timedOut: sb.killedBy === "TO",
+    verdict,
+    timeMs: sb.timeMs,
+    cpuMs: sb.cpuMs,
+    memKb: sb.memKb,
+  };
+}
+
+export const submitRouter: Router = Router();
+
+/**
+ * POST /submit — main judging endpoint. Flow:
+ *  1. validate payload  2. normalize legacy lang
+ *  3. acquire global semaphore slot  4. acquire UID + workdir
+ *  5. check compile cache → compile if miss (compile fail → HTTP 200 with compileError)
+ *  6. put artifact in cache  7. per-submission worker pool runs each test
+ *  8. each test: nsjail → compare → verdict
+ *  9. sort by index, summarize, cleanup, return 200.
+ */
+submitRouter.post("/", async (req: Request, res: Response) => {
+  // Refuse new work during drain. Must run BEFORE any resource acquisition
+  // (semaphore / UID / workdir / sandbox spawn) so SIGTERM can actually
+  // quiesce the judge within the drain window.
+  if (isDraining()) {
+    res.status(503).json({ error: "shutting down" });
+    return;
+  }
+
+  const validation = validateSubmit(req.body);
+  if (!validation.ok) {
+    res.status(400).json({ error: validation.error });
+    return;
+  }
+  const payload = validation.value;
+
+  const language = normalizeLanguage(payload.language);
+  const compareMode: CompareMode = payload.compareMode ?? "trim-trailing";
+  const timeLimitMs = payload.timeLimit ?? 5000;
+  const memLimitMb = payload.memoryLimit ?? 256;
+
+  logger.info(
+    {
+      language,
+      codeLen: payload.code.length,
+      cases: payload.input.length,
+      timeLimitMs,
+      memLimitMb,
+      compareMode,
+    },
+    "submit: received",
+  );
+
+  // Whole /submit runs under the global semaphore. No work should happen
+  // outside this closure (validation excepted) — it's what bounds load.
+  await submitSemaphore(async () => {
+    let uid: number | null = null;
+    let workDir: string | null = null;
+    try {
+      const executor = executorFor(language);
+      const filename = executor.filename(payload.code);
+
+      uid = await acquireUid();
+      workDir = await createWorkdir(uid);
+
+      await executor.prepare(workDir, payload.code);
+      // The files the executor just wrote are owned by root; hand them to the pool UID.
+      await chownTree(workDir, uid).catch((err) => {
+        logger.warn({ err, workDir }, "submit: chown tree failed; continuing");
+      });
+
+      const runCmd = executor.buildRunCommand(workDir, filename);
+
+      // Cache key covers (language, source, compile argv) per the plan.
+      // Interpreted languages (python3/pypy3) have no compile step, so we
+      // key on the empty array — matches the "no compile argv" semantics.
+      const compileArgv = compileArgvFor(language);
+      const key = cacheKey(language, payload.code, compileArgv);
+
+      const cachedDir = await compileCache.get(key);
+      if (cachedDir) {
+        // Copy cached artifact into workdir; re-chown to pool UID.
+        await fs.cp(cachedDir, workDir, { recursive: true, force: true });
+        await chownTree(workDir, uid).catch(() => {});
+      } else {
+        const compileRes = await executor.compile(workDir);
+        if (!compileRes.ok) {
+          // Compile fail → HTTP 200 with compileError per contract.
+          const response: SubmitResponse = {
+            summary: { total: 0, passed: 0, failed: 0 },
+            results: [],
+            compileError: compileRes.stderr,
+          };
+          res.status(200).json(response);
+          return;
+        }
+        // Successful compile → store in cache. Cache errors must not fail the submission.
+        await compileCache
+          .put(key, workDir)
+          .catch((err) => logger.warn({ err }, "submit: compile cache put failed"));
+        await chownTree(workDir, uid).catch(() => {});
+      }
+
+      // Per-submission pool: bound test-case parallelism within this submission.
+      const pool = createPool(config.PER_SUBMISSION_CONCURRENCY);
+
+      const resultPromises = payload.input.map((rawInput, i) =>
+        pool.run(async (): Promise<TestResult> => {
+          const stdin = rawInput.endsWith("\n") ? rawInput : rawInput + "\n";
+          const expected = payload.output[i] ?? "";
+          const sandboxRes = await runSandboxed({
+            argv: runCmd.argv,
+            cwd: "/",
+            uid: uid as number,
+            gid: uid as number,
+            timeLimitMs,
+            memLimitMb,
+            stdin,
+            chrootDir: workDir as string,
+          });
+          const passed =
+            sandboxRes.exitCode === 0 &&
+            sandboxRes.killedBy === null &&
+            compare(compareMode, expected, sandboxRes.stdout);
+          const verdict = deriveVerdict(sandboxRes, passed);
+          return buildResult(i, expected, sandboxRes, passed, verdict);
+        }),
+      );
+
+      const results = (await Promise.all(resultPromises)).sort(
+        (a, b) => a.index - b.index,
+      );
+
+      const summary = {
+        total: results.length,
+        passed: results.filter((r) => r.passed).length,
+        failed: results.filter((r) => !r.passed).length,
+      };
+
+      const response: SubmitResponse = { summary, results };
+      res.status(200).json(response);
+    } catch (err) {
+      logger.error({ err }, "submit: unexpected failure");
+      if (!res.headersSent) {
+        res.status(500).json({ error: (err as Error).message });
+      }
+    } finally {
+      if (workDir) await cleanupWorkdir(workDir);
+      if (uid !== null) releaseUid(uid);
+    }
+  });
+});
+
+/**
+ * Recursively chown every entry under `dir` to `uid:uid`. Used after
+ * `executor.prepare()` so the sandboxed pool UID can read/execute what
+ * Node (running as root) just wrote.
+ */
+async function chownTree(dir: string, uid: number): Promise<void> {
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  await fs.chown(dir, uid, uid).catch(() => {});
+  for (const entry of entries) {
+    const full = `${dir}/${entry.name}`;
+    await fs.chown(full, uid, uid).catch(() => {});
+    if (entry.isDirectory()) {
+      await chownTree(full, uid);
+    }
+  }
+}
