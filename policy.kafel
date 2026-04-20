@@ -16,6 +16,15 @@
 POLICY wmoj_judge {
   ALLOW {
     // ---- Process lifecycle ----
+    // execve / execveat: nsjail's subproc::newProc installs the
+    // seccomp filter via sandbox::applyPolicy (subproc.cc:209) and then
+    // calls execv() (line 222) — or execveat(), if --execute_fd is set —
+    // to transition into the user binary (e.g. ./a.out, /usr/bin/python3).
+    // Because the seccomp filter is live at the moment of exec, both
+    // syscalls must be in the allow-list or the kernel SIGSYS-kills the
+    // process before a single instruction of user code runs (exit 159).
+    execve,
+    execveat,
     exit,
     exit_group,
     rt_sigreturn,
