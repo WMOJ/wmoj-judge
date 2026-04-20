@@ -261,4 +261,18 @@ POLICY wmoj_judge {
   }
 }
 
-USE wmoj_judge DEFAULT ERRNO(1)
+// DEFAULT = ENOSYS (errno 38), NOT EPERM. Critical for glibc thread
+// creation: modern glibc (2.34+, which Debian trixie has at 2.37+)
+// calls clone3() first for pthread_create and only falls back to the
+// classic clone() when clone3 returns ENOSYS. Under the previous
+// DEFAULT ERRNO(1), clone3 returned EPERM and glibc propagated that
+// straight to pthread_create, producing the JVM error:
+//     "pthread_create failed (EPERM) for attributes: stacksize: 1024k"
+//     "Cannot create VM thread. Out of system resources."
+// The explicit ERRNO(1) denylist block above still returns EPERM for
+// the dangerous syscalls that applications EXPECT to see EPERM on
+// (socket/connect/ptrace/mount/etc). Only *unlisted* syscalls fall
+// through to this default -- precisely the ones where ENOSYS is the
+// right "not supported, try an older syscall" semantic. Security is
+// unchanged: blocked is blocked, just a different errno.
+USE wmoj_judge DEFAULT ERRNO(38)

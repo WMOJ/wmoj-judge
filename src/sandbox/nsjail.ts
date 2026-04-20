@@ -101,8 +101,14 @@ export async function runSandboxed(
     "--cwd", opts.cwd,
     "--rlimit_as", String(rlimitAsMb),
     "--rlimit_cpu", String(cpuSec),
-    "--rlimit_nproc", "32",
-    "--rlimit_nofile", "64",
+    // JVMs are thread-heavy: GC workers, JIT compiler threads, signal
+    // dispatcher, finalizer, reference handler, plus user threads.
+    // 32 is too tight -- JDK 25 on a multi-core host can want 20+
+    // at startup alone. 256 is comfortable for the JVM and still far
+    // below anything a malicious submission could use for DoS given
+    // RLIMIT_AS / RLIMIT_CPU are also in effect.
+    "--rlimit_nproc", "256",
+    "--rlimit_nofile", "256",
     "--rlimit_fsize", "10",
     "--rlimit_core", "0",
     "--seccomp_policy", config.SECCOMP_POLICY,
