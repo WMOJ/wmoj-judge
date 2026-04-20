@@ -166,13 +166,17 @@ export async function runSandboxed(
     memLimitMb: opts.memLimitMb,
   });
 
-  // Diagnostic logging: when a sandbox run produced no stdout AND the
-  // exit code suggests a setup failure (nsjail returns 255 when it
-  // couldn't set up the jail or exec the child), emit the raw nsjail
-  // stderr so we can see the actual failure reason in Render logs.
-  // `stripNsjailLogLines` in the client response intentionally hides
-  // nsjail's `[...]` lines from the user; we surface them here for ops.
-  if (stdout.length === 0 && (code === 255 || code === 1 || code === null)) {
+  // Diagnostic logging: surface raw nsjail output to server logs
+  // whenever a run didn't complete normally. Covers:
+  //   - nsjail setup failures (exit 255 / 1 / null)
+  //   - seccomp SIGSYS kills (exit 159 = 128 + 31)
+  //   - other fatal signals (exit > 128)
+  //   - any empty-stdout case that wasn't a clean exit(0)
+  // `stripNsjailLogLines` hides these from the client response by
+  // design, but ops needs to see them.
+  const nonCleanExit = code !== 0;
+  const signalKilled = typeof code === "number" && code >= 128;
+  if (nonCleanExit || signalKilled) {
     logger.warn(
       {
         exitCode: code,
@@ -182,9 +186,10 @@ export async function runSandboxed(
         cwd: opts.cwd,
         uid: opts.uid,
         wallMs,
-        nsjailRaw: stderrRaw.slice(0, 2000),
+        stdoutLen: stdout.length,
+        nsjailRaw: stderrRaw.slice(0, 3000),
       },
-      "sandbox: empty stdout with non-clean exit — raw nsjail diagnostics follow",
+      "sandbox: non-clean exit — raw nsjail diagnostics follow",
     );
   }
 
