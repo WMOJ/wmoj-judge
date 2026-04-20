@@ -98,13 +98,22 @@ RUN java -Xshare:dump -XX:SharedArchiveFile=/app/jvm-cds.jsa \
         > /tmp/cds.log 2>&1 \
     || echo "WARN: JVM CDS dump failed; java will run without -Xshare:on"
 
-# Lock down /app: unprivileged judge-* UIDs must not be able to read
-# any judge source or static asset. Node itself runs as root, so it
-# can still access everything it needs. The sandboxed children live
-# inside chrooted workdirs under /tmp, not /app, so they never need
-# any access to /app.
-RUN chown -R root:root /app \
-    && chmod -R 700 /app
+# Run Node as the judge-1000 unprivileged user. This is REQUIRED on
+# Render-style unprivileged containers because nsjail's initNsFromChild
+# issues prctl(PR_SET_SECUREBITS, ...) which needs CAP_SETPCAP (which
+# Render does not grant). nsjail has an early-return guard that skips
+# that whole block when orig_euid != 0:
+#
+#   if (!clone_newuser && orig_euid != 0) return true;
+#
+# so by running as UID 1000 we bypass the failing prctl entirely. The
+# sandboxed child simply inherits Node's UID (no setuid happens), which
+# still gives us an unprivileged, capability-less, no-new-privs process
+# with the full seccomp allow-list and rlimits.
+RUN chown -R 1000:1000 /app \
+    && chmod -R 750 /app
+
+USER 1000
 
 ENV NODE_ENV=production \
     NSJAIL_BIN=/usr/local/bin/nsjail \

@@ -31,9 +31,14 @@ const cpuCount = Math.max(2, os.cpus().length);
 
 function readSharedSecret(): string {
   const raw = process.env.JUDGE_SHARED_SECRET;
+  // Scrub the variable from process.env as soon as we've read it.
+  // Sandboxed children inherit Node's UID on Render (see Dockerfile
+  // for why), so /proc/<node_pid>/environ would be readable to user
+  // code. We already strip env via sandbox/minimalEnv, but this closes
+  // the /proc-based leak path even before the child starts.
+  delete process.env.JUDGE_SHARED_SECRET;
   if (raw && raw.length > 0) return raw;
   if (IS_PROD) {
-    // Crash at boot — the judge must never run in prod without a secret.
     throw new Error(
       "JUDGE_SHARED_SECRET is required in production but was not set",
     );

@@ -27,7 +27,17 @@ const activeWorkdirs = new Set<string>();
 export async function createWorkdir(uid: number): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), WORKDIR_PREFIX));
   try {
-    await fs.chown(dir, uid, uid);
+    // Only attempt chown when running as root. On Render we run Node
+    // as an unprivileged UID (so nsjail's orig_euid != 0 early-return
+    // bypasses the CAP_SETPCAP-requiring prctl); that UID can't chown
+    // to foreign UIDs. In that mode the mkdtemp'd dir is already owned
+    // by our process UID, which is the same UID the sandbox child will
+    // run as, so no chown is needed.
+    const effectiveUid =
+      typeof process.geteuid === "function" ? process.geteuid() : 0;
+    if (effectiveUid === 0 && uid !== 0) {
+      await fs.chown(dir, uid, uid);
+    }
     await fs.chmod(dir, 0o700);
   } catch (err) {
     // Setup failed — we own this dir, so remove it before propagating.
