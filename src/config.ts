@@ -67,18 +67,33 @@ export interface JudgeConfig {
 /**
  * Typed, frozen configuration object. Read once at module load time so
  * the rest of the codebase never reaches into `process.env` directly.
+ *
+ * Env-var convention: the only env vars currently set in both
+ * `.env.local` and the Render dashboard's Environment Variables panel
+ * are `JUDGE_SHARED_SECRET` and `AUTH_STRICT` (the two that .env.local
+ * instructs operators to mirror into Render). Every other variable
+ * referenced below is intentionally left unset — the fallback after
+ * the comma (or `??`) is the effective value in production. Each
+ * unset var is tagged inline below for clarity. Set an env var on a
+ * specific deploy only when you genuinely need a non-default value.
  */
 export const config: JudgeConfig = Object.freeze({
+  // PORT (and fallback JUDGE_PORT): unset in both .env.local and the
+  // Render dashboard — default 4001 applies.
   PORT: intEnv("PORT", intEnv("JUDGE_PORT", 4001)),
   NODE_ENV,
   IS_PROD,
   JUDGE_SHARED_SECRET: readSharedSecret(),
   AUTH_STRICT: boolEnv("AUTH_STRICT", false),
+  // UID_POOL_SIZE: unset in both .env.local and the Render dashboard
+  // — default 16 applies.
   UID_POOL_SIZE: intEnv("UID_POOL_SIZE", 16),
   // GLOBAL_SUBMIT_CONCURRENCY: how many /submit requests may run in
   // parallel. Default to host CPU count so multiple submissions can
   // still overlap at the submission level. Floor of 1 honours operator
   // env overrides (prior Math.max(2, …) silently ignored "1").
+  // Unset in both .env.local and the Render dashboard — default
+  // (cpuCount) applies.
   GLOBAL_SUBMIT_CONCURRENCY: Math.max(1, intEnv("GLOBAL_SUBMIT_CONCURRENCY", cpuCount)),
   // PER_SUBMISSION_CONCURRENCY: how many test cases within a single
   // submission run in parallel. Default 1 (serial) so each test's CPU
@@ -86,12 +101,28 @@ export const config: JudgeConfig = Object.freeze({
   // shared vCPUs, wall time inflates with the scheduler's round-robin
   // and made TLE verdicts non-deterministic. Operators on dedicated
   // multi-core hardware can raise this via env var.
+  // Unset in both .env.local and the Render dashboard — default 1
+  // applies.
   PER_SUBMISSION_CONCURRENCY: Math.max(1, intEnv("PER_SUBMISSION_CONCURRENCY", 1)),
+  // COMPILE_CACHE_TTL_MS: unset in both .env.local and the Render
+  // dashboard — default 15 minutes applies.
   COMPILE_CACHE_TTL_MS: intEnv("COMPILE_CACHE_TTL_MS", 15 * 60 * 1000),
+  // COMPILE_CACHE_DIR: unset in both .env.local and the Render
+  // dashboard — default /tmp/judge-cache applies.
   COMPILE_CACHE_DIR: process.env.COMPILE_CACHE_DIR ?? "/tmp/judge-cache",
+  // RATE_LIMIT_WINDOW_MS: unset in both .env.local and the Render
+  // dashboard — default 60s applies.
   RATE_LIMIT_WINDOW_MS: intEnv("RATE_LIMIT_WINDOW_MS", 60_000),
+  // RATE_LIMIT_MAX: unset in both .env.local and the Render dashboard
+  // — default 60 requests per window applies.
   RATE_LIMIT_MAX: intEnv("RATE_LIMIT_MAX", 60),
+  // NSJAIL_BIN: unset in both .env.local and the Render dashboard —
+  // default /usr/local/bin/nsjail applies.
   NSJAIL_BIN: process.env.NSJAIL_BIN ?? "/usr/local/bin/nsjail",
+  // SECCOMP_POLICY: unset in both .env.local and the Render dashboard
+  // — default /app/policy.kafel applies.
   SECCOMP_POLICY: process.env.SECCOMP_POLICY ?? "/app/policy.kafel",
+  // LOG_LEVEL: unset in both .env.local and the Render dashboard —
+  // default "info" applies.
   LOG_LEVEL: process.env.LOG_LEVEL ?? "info",
 });
