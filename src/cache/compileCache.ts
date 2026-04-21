@@ -1,4 +1,4 @@
-import { createHash } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import { promises as fs } from "fs";
 import * as path from "path";
 import type { CompileCache } from "../types";
@@ -82,13 +82,31 @@ class DiskCompileCache implements CompileCache {
   /**
    * Copy `artifactDir` into the cache under `key` and return the new
    * cached path. Overwrites any existing entry for the same key.
+   *
+   * Atomic staging: write into a temp dir, then rm+rename. Concurrent
+   * readers (`fs.cp` from the cache path in routes/submit.ts) therefore
+   * see either the previous complete artifact or the new complete one,
+   * never a half-populated directory. The small rm→rename window still
+   * exists but a reader that races it just gets a cache miss from
+   * `get()` (which re-checks the in-memory map) — harmless.
    */
   async put(key: string, artifactDir: string): Promise<string> {
     await this.ensureBase();
     const dst = path.join(this.baseDir, key);
-    // If there's a stale entry for this key, remove it first so cp is clean.
-    await fs.rm(dst, { recursive: true, force: true }).catch(() => {});
-    await copyDir(artifactDir, dst);
+    const tmp = path.join(
+      this.baseDir,
+      `${key}.tmp-${randomBytes(8).toString("hex")}`,
+    );
+    try {
+      await copyDir(artifactDir, tmp);
+      // fs.rename cannot replace a non-empty directory on POSIX; remove
+      // any existing entry first, then move the staged dir into place.
+      await fs.rm(dst, { recursive: true, force: true }).catch(() => {});
+      await fs.rename(tmp, dst);
+    } catch (err) {
+      await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+      throw err;
+    }
     this.entries.set(key, { dir: dst, expiresAt: Date.now() + this.ttlMs });
     return dst;
   }

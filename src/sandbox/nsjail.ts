@@ -9,8 +9,12 @@ import { config } from "../config";
  * a SIGKILL of last resort. nsjail should have killed the child via
  * RLIMIT_CPU well before this, so reaching this timer indicates a
  * stuck nsjail or kernel issue rather than a runaway user program.
+ *
+ * Sized to absorb per-spawn overhead spikes (nsjail fork+exec, kafel
+ * parse, BPF compile, V8 GC) without false kills under load, while
+ * still firing well within Render's SIGTERM→SIGKILL drain window.
  */
-const KILL_GRACE_MS = 2000;
+const KILL_GRACE_MS = 5000;
 
 interface NsjailMeta {
   exitReason?: string;
@@ -21,10 +25,12 @@ interface NsjailMeta {
 }
 
 /**
- * Convert a submission's wall-clock time budget in ms to the
- * RLIMIT_CPU value nsjail wants in whole seconds. Add 1s of slack so
- * short (<1s) limits don't underflow and so the CPU limit triggers
- * slightly after wall-clock — wall is the authoritative limit.
+ * Convert a submission's time budget in ms to the RLIMIT_CPU value
+ * nsjail wants in whole seconds. +1s of slack so short (<1s) limits
+ * don't underflow and so RLIMIT_CPU triggers strictly after the
+ * userland CPU check in classifyKill — RLIMIT_CPU is a kernel-level
+ * backstop against runaway CPU, while `meta.cpuTimeMs >= timeLimitMs`
+ * is the authoritative TLE gate with sub-second precision.
  */
 function cpuLimitSecFor(timeLimitMs: number): number {
   return Math.ceil(timeLimitMs / 1000) + 1;
@@ -109,7 +115,12 @@ export async function runSandboxed(
     "--env", "LANG",
     "--env", "LC_ALL",
     "--env", "PYTHONUNBUFFERED",
-    "--time_limit", String(cpuSec),
+    // nsjail's --time_limit is wall-clock and serves only as a liveness
+    // backstop; CPU time (via --rlimit_cpu and userland cpuTimeMs check
+    // in classifyKill) is authoritative for TLE. Set generously beyond
+    // Node's own SIGKILL timer so we get one authoritative wall kill
+    // (Node's) rather than racing two wall timers against setup overhead.
+    "--time_limit", String(Math.ceil((opts.timeLimitMs + KILL_GRACE_MS) / 1000) + 2),
     "--log_fd", "2",
     "--",
     ...opts.argv,
@@ -182,6 +193,24 @@ export async function runSandboxed(
     timeLimitMs: opts.timeLimitMs,
     memLimitMb: opts.memLimitMb,
   });
+
+  // Setup-overhead telemetry. `parentWallMs` includes nsjail fork/exec,
+  // kafel parse, BPF compile, V8 GC pauses, and event-loop jitter;
+  // `nsjailWallMs` is nsjail's own inner measurement of just the jailed
+  // child. The delta is the judge's per-spawn overhead — useful for
+  // verifying that TLE is no longer sensitive to it, and for alerting
+  // when it regresses. Debug level so it's off by default in prod.
+  logger.debug(
+    {
+      cpuMs: meta.cpuTimeMs,
+      nsjailWallMs: meta.wallTimeMs,
+      parentWallMs: wallMs,
+      setupOverheadMs: Math.max(0, wallMs - (meta.wallTimeMs ?? wallMs)),
+      killedBy,
+      timeLimitMs: opts.timeLimitMs,
+    },
+    "sandbox: timing",
+  );
 
   // Diagnostic logging: surface raw nsjail output to server logs
   // whenever a run didn't complete normally. Covers:
@@ -286,12 +315,25 @@ function stripNsjailLogLines(stderr: string): string {
 }
 
 /**
- * Decide the `killedBy` classification. Checks in this order:
- *   TO : RLIMIT_CPU, wall-clock, or node-side kill timer fired.
- *   OOM: RLIMIT_AS hit, peak RSS >= memLimit, or SIGSEGV with RSS near
- *        the limit.
- *   SIG: any non-zero signal that isn't explained by the above.
- *   null: clean exit.
+ * Decide the `killedBy` classification. CPU time is the authoritative
+ * measure of program cost — parent-measured wall time includes nsjail
+ * fork/exec, kafel parse, BPF compile, V8 GC, and event-loop jitter,
+ * none of which is user work, and all of which vary run-to-run under
+ * load. The old "wallMs >= timeLimitMs" check produced flaky TLE on
+ * identical submissions; this ladder decides from CPU time and uses
+ * wall only as a loose liveness backstop.
+ *
+ * Order of checks:
+ *   1. Node's last-resort SIGKILL timer fired    -> TO  (stuck nsjail/kernel)
+ *   2. nsjail reported RLIMIT_CPU / --time_limit -> TO
+ *   3. nsjail reported RLIMIT_AS / mem-limit     -> OOM
+ *   4. CPU time consumed >= user's timeLimitMs   -> TO  (authoritative)
+ *   5. Clean exit (0, no signal) && CPU in budget -> null (AC/WA)
+ *   6. Inner wall >= 3 * timeLimitMs             -> TO  (sleepy/blocked)
+ *   7. Peak RSS over the memory cap              -> OOM
+ *   8. Any fatal signal not explained above       -> SIG
+ *   9. Null exit code (nsjail spawn fail)        -> SIG
+ *  10. Otherwise                                  -> null
  */
 function classifyKill(args: {
   timedOutByNode: boolean;
@@ -316,8 +358,28 @@ function classifyKill(args: {
   if (meta.exitReason === "cpu-limit") return "TO";
   if (meta.exitReason === "mem-limit") return "OOM";
 
-  // Wall-clock hit: nsjail's --time_limit or Node's timer.
-  if (wallMs >= timeLimitMs) return "TO";
+  // CPU-time TLE (authoritative). nsjail emits `cpu time: N.NNs` which
+  // we parse into meta.cpuTimeMs. This is the actual CPU work consumed
+  // by the process, independent of host scheduling or judge overhead,
+  // and is what makes verdicts deterministic across runs.
+  if (meta.cpuTimeMs !== undefined && meta.cpuTimeMs >= timeLimitMs) {
+    return "TO";
+  }
+
+  // Clean-exit guard. A normal exit(0) with no signal and no node-side
+  // kill means the program actually finished — never downgrade it to
+  // TLE on parent-measured wall noise. (The CPU-time check above has
+  // already rejected programs that finished but exceeded their budget.)
+  if (exitCode === 0 && signal === null) return null;
+
+  // Wall-clock liveness backstop. Catches programs that block on
+  // syscalls (sleep, I/O wait) without consuming CPU. Uses nsjail's
+  // inner wall clock when available (excludes judge setup overhead);
+  // 3x cushion keeps the threshold far from legitimate-run noise while
+  // still bounding wedged submissions. Node's SIGKILL timer (fired at
+  // timeLimitMs + KILL_GRACE_MS) is the tighter of the two in practice.
+  const innerWallMs = meta.wallTimeMs ?? wallMs;
+  if (innerWallMs >= timeLimitMs * 3) return "TO";
 
   const memLimitKb = memLimitMb * 1024;
   if (meta.maxRssKb !== undefined && meta.maxRssKb >= memLimitKb) {

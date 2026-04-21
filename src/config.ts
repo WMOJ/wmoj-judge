@@ -27,7 +27,7 @@ function boolEnv(name: string, fallback: boolean): boolean {
 const NODE_ENV = process.env.NODE_ENV ?? "development";
 const IS_PROD = NODE_ENV === "production";
 
-const cpuCount = Math.max(2, os.cpus().length);
+const cpuCount = Math.max(1, os.cpus().length);
 
 function readSharedSecret(): string {
   const raw = process.env.JUDGE_SHARED_SECRET;
@@ -75,8 +75,18 @@ export const config: JudgeConfig = Object.freeze({
   JUDGE_SHARED_SECRET: readSharedSecret(),
   AUTH_STRICT: boolEnv("AUTH_STRICT", false),
   UID_POOL_SIZE: intEnv("UID_POOL_SIZE", 16),
-  GLOBAL_SUBMIT_CONCURRENCY: Math.max(2, intEnv("GLOBAL_SUBMIT_CONCURRENCY", cpuCount)),
-  PER_SUBMISSION_CONCURRENCY: Math.max(2, intEnv("PER_SUBMISSION_CONCURRENCY", cpuCount)),
+  // GLOBAL_SUBMIT_CONCURRENCY: how many /submit requests may run in
+  // parallel. Default to host CPU count so multiple submissions can
+  // still overlap at the submission level. Floor of 1 honours operator
+  // env overrides (prior Math.max(2, …) silently ignored "1").
+  GLOBAL_SUBMIT_CONCURRENCY: Math.max(1, intEnv("GLOBAL_SUBMIT_CONCURRENCY", cpuCount)),
+  // PER_SUBMISSION_CONCURRENCY: how many test cases within a single
+  // submission run in parallel. Default 1 (serial) so each test's CPU
+  // and wall measurements are clean — under parallel execution on
+  // shared vCPUs, wall time inflates with the scheduler's round-robin
+  // and made TLE verdicts non-deterministic. Operators on dedicated
+  // multi-core hardware can raise this via env var.
+  PER_SUBMISSION_CONCURRENCY: Math.max(1, intEnv("PER_SUBMISSION_CONCURRENCY", 1)),
   COMPILE_CACHE_TTL_MS: intEnv("COMPILE_CACHE_TTL_MS", 15 * 60 * 1000),
   COMPILE_CACHE_DIR: process.env.COMPILE_CACHE_DIR ?? "/tmp/judge-cache",
   RATE_LIMIT_WINDOW_MS: intEnv("RATE_LIMIT_WINDOW_MS", 60_000),
