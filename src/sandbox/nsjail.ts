@@ -41,8 +41,9 @@ function cpuLimitSecFor(timeLimitMs: number): number {
  * Responsibilities:
  *   - Build argv: chroot, user, group, rlimits, seccomp, env whitelist.
  *   - Stream `opts.stdin` to the child, collect stdout/stderr.
- *   - Parse nsjail's own diagnostic output on --log_fd=2 (same fd as
- *     the child's stderr).
+ *   - Parse nsjail's own diagnostic output on --log_fd=3 (a dedicated
+ *     pipe, separate from the child's stderr — see comment on the
+ *     stdio array below for why).
  *   - Honour the node-side last-resort SIGKILL timer.
  */
 export async function runSandboxed(
@@ -121,7 +122,19 @@ export async function runSandboxed(
     // Node's own SIGKILL timer so we get one authoritative wall kill
     // (Node's) rather than racing two wall timers against setup overhead.
     "--time_limit", String(Math.ceil((opts.timeLimitMs + KILL_GRACE_MS) / 1000) + 2),
-    "--log_fd", "2",
+    // Route nsjail's own diagnostic output to fd 3 (a dedicated pipe set
+    // up below via stdio: [..., "pipe"]) instead of fd 2. If we let nsjail
+    // log to fd 2, its `[L][timestamp] ...` lines interleave with the
+    // child's stderr at the byte level (cerr's unit-buffered writes can
+    // be split mid-array by nsjail logger writes). That cross-talk broke
+    // /generate-tests entirely, because the generator's stderr-side JSON
+    // array (`[...]`) shares a leading `[` with nsjail's log prefix, so
+    // any string-based "strip lines that start with [" filter either ate
+    // the user's JSON outright or fragmented it into something that
+    // JSON.parse choked on ("Unexpected non-whitespace character after
+    // JSON at position N"). Keeping them on separate fds is the only
+    // robust fix — the child's stderr is now byte-clean.
+    "--log_fd", "3",
     "--",
     ...opts.argv,
   ];
@@ -132,10 +145,16 @@ export async function runSandboxed(
   const jailEnv = buildChildEnv("python3");
 
   const started = Date.now();
+  // Four stdio slots: stdin (0), child stdout (1), child stderr (2),
+  // and a dedicated pipe (3) that nsjail's `--log_fd 3` writes its own
+  // diagnostics to. Keeping nsjail's log on fd 3 means fd 2 carries
+  // ONLY the child's stderr — no interleaving, no string-based filter
+  // needed downstream. (See the comment on `--log_fd 3` in argv above
+  // for the full background.)
   const child = spawn(config.NSJAIL_BIN, argv, {
     cwd: opts.cwd,
     env: jailEnv,
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe", "pipe"],
   });
 
   // Feed stdin and close. If the child never reads, the pipe EOFs and
@@ -149,8 +168,20 @@ export async function runSandboxed(
 
   const stdoutChunks: Buffer[] = [];
   const stderrChunks: Buffer[] = [];
+  const logChunks: Buffer[] = [];
   child.stdout.on("data", (c: Buffer) => stdoutChunks.push(c));
   child.stderr.on("data", (c: Buffer) => stderrChunks.push(c));
+  // child.stdio[3] is the parent-side end of the log pipe. It's typed as
+  // Readable | Writable | null in Node's TS defs (the spawn() options
+  // can produce either direction), but for our `stdio: [..., "pipe"]`
+  // entry the kernel makes it readable — the child writes its log there.
+  const logStream = child.stdio[3] as NodeJS.ReadableStream | null;
+  if (logStream) {
+    logStream.on("data", (c: Buffer) => logChunks.push(c));
+    // Swallow any unexpected error on the log pipe — diagnostics are
+    // strictly best-effort and must never fail the run.
+    logStream.on("error", () => {});
+  }
 
   let killedByTimer = false;
   const killTimer = setTimeout(() => {
@@ -179,10 +210,16 @@ export async function runSandboxed(
 
   const wallMs = Date.now() - started;
   const stdout = Buffer.concat(stdoutChunks).toString("utf8");
-  const stderrRaw = Buffer.concat(stderrChunks).toString("utf8");
+  // The child's stderr is now byte-clean: nsjail's logger writes to fd
+  // 3 (captured separately into `nsjailLog` below), so nothing here
+  // came from nsjail. Forward it to the caller as-is — no filtering,
+  // no normalisation. This is what makes /generate-tests parseable
+  // again and what makes /submit's TestResult.stderr show the user's
+  // real stderr without the old `[I][...]` cross-talk getting mixed in.
+  const stderr = Buffer.concat(stderrChunks).toString("utf8");
+  const nsjailLog = Buffer.concat(logChunks).toString("utf8");
 
-  const meta = parseNsjailStderr(stderrRaw);
-  const stderr = stripNsjailLogLines(stderrRaw);
+  const meta = parseNsjailStderr(nsjailLog);
 
   const killedBy = classifyKill({
     timedOutByNode: killedByTimer,
@@ -218,8 +255,9 @@ export async function runSandboxed(
   //   - seccomp SIGSYS kills (exit 159 = 128 + 31)
   //   - other fatal signals (exit > 128)
   //   - any empty-stdout case that wasn't a clean exit(0)
-  // `stripNsjailLogLines` hides these from the client response by
-  // design, but ops needs to see them.
+  // nsjail's log fd is captured into `nsjailLog`; the child's own stderr
+  // (which we surface to the API caller) is captured into `stderr`. Both
+  // are useful when debugging an IE — log a slice of each.
   const nonCleanExit = code !== 0;
   const signalKilled = typeof code === "number" && code >= 128;
   if (nonCleanExit || signalKilled) {
@@ -233,7 +271,9 @@ export async function runSandboxed(
         uid: opts.uid,
         wallMs,
         stdoutLen: stdout.length,
-        nsjailRaw: stderrRaw.slice(0, 3000),
+        stderrLen: stderr.length,
+        nsjailLog: nsjailLog.slice(0, 3000),
+        childStderr: stderr.slice(0, 3000),
       },
       "sandbox: non-clean exit — raw nsjail diagnostics follow",
     );
@@ -252,9 +292,10 @@ export async function runSandboxed(
 }
 
 /**
- * nsjail writes diagnostics to `--log_fd=2`, interleaved with the
- * child's own stderr. Lines it emits start with a `[` (timestamp +
- * level prefix). Parse the ones we care about:
+ * nsjail writes diagnostics to `--log_fd=3` (a dedicated pipe set up
+ * by runSandboxed). Every line nsjail emits there starts with a `[L]`
+ * level prefix followed by a `[timestamp]`. Parse the ones we care
+ * about:
  *
  *   "exit status: N"                    -> exit code
  *   "killed by signal: SIGKILL (9)"     -> signal
@@ -263,6 +304,11 @@ export async function runSandboxed(
  *   "cpu time:        N.NNs"            -> cpu time
  *   "time >= soft limit"                -> RLIMIT_CPU hit (TLE)
  *   "maximum memory usage"              -> RLIMIT_AS hit (MLE)
+ *
+ * Lines that don't start with `[` are skipped defensively — nsjail's
+ * own logger always prefixes with `[L][timestamp]` so anything else
+ * is either a continuation/multi-line message from a future version
+ * or noise we can't reliably interpret.
  */
 function parseNsjailStderr(stderr: string): NsjailMeta {
   const meta: NsjailMeta = {};
@@ -300,18 +346,6 @@ function parseNsjailStderr(stderr: string): NsjailMeta {
     }
   }
   return meta;
-}
-
-/**
- * Remove nsjail's own log lines (those starting with `[`) from the
- * combined stderr stream so the caller only sees what user code wrote.
- * Log lines are still available in the parsed meta object above.
- */
-function stripNsjailLogLines(stderr: string): string {
-  return stderr
-    .split(/\r?\n/)
-    .filter((l) => !l.startsWith("["))
-    .join("\n");
 }
 
 /**
