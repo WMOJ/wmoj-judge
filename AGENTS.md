@@ -129,19 +129,20 @@ Enforced in `src/middleware/requestCaps.ts` (413 on violation):
 | Source code | 100 KB |
 | Checker source | 100 KB |
 
-These exist because the host has 512 MB of RAM and the whole payload is buffered in memory. WMOJ
-problems are authored to fit: in practice **8–65 cases (avg ~33)**, most inputs a few KB, heaviest
-around 50–120 KB per case. That is deliberately fewer and smaller than other sites hosting the same
-problems — coverage of core edge cases is the goal, not exhaustiveness.
-
-Two live problems currently exceed the 1 MB per-case cap and are therefore unsubmittable (413 before
-anything runs).
+These exist because the host has 512 MB of RAM and the whole payload is buffered in memory. WMOJ's
+**74 problems** are authored to fit: **8–65 cases (avg ~28)**, most inputs a few KB, heaviest around
+50–120 KB per case. The 50 CCC problems — the newest cohort and the one sized against these caps
+deliberately — run 15–55 cases (avg 25), largest case 119 KB, under 600 KB total. That is
+deliberately fewer and smaller than other sites hosting the same problems — coverage of core edge
+cases is the goal, not exhaustiveness. Two legacy problems exceed the 1 MB per-case cap and are
+therefore unsubmittable (413 before anything runs).
 
 A `memoryLimit` above the host's total RAM can never actually be enforced, so the judge no longer
 pretends otherwise: every submission's cap is clamped to
 `min(requested, HOST_MEMORY_CEILING_MB)` (default **512**, env-overridable) and the clamped value is
-returned as `effectiveMemoryLimitMb`. The six live problems declaring 1024 MB now run at 512 and get
-a clean `MLE` instead of a confusing container-level crash. The clamp applies to `/submit` only —
+returned as `effectiveMemoryLimitMb`. A problem is free to declare its source contest's real limit;
+anything over 512 simply runs at 512 and gets a clean `MLE` rather than a confusing container-level
+crash. No live problem declares more than 512 today. The clamp applies to `/submit` only —
 `/generate-tests` keeps its own hardcoded 60 s / 1 GB generator limits.
 
 ## Sandbox — read before touching `src/sandbox/` or `policy.kafel`
