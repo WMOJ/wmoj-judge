@@ -31,8 +31,12 @@ Check it:
 
 ```bash
 curl http://localhost:4001/health
-# → {"status":"ok"}
+# → {"status":"ok","version":"0.2.0+2026-08-15T12:00:00.000Z"}
 ```
+
+`version` is the deployed git commit when the host provides one (Render sets `RENDER_GIT_COMMIT`),
+otherwise the package version plus the process start time — poll it to tell a new build from the
+old one.
 
 Keep that secret — `wmoj-app` needs the same value in its `JUDGE_SHARED_SECRET`.
 
@@ -66,6 +70,7 @@ Only two variables normally need setting; everything else has a sensible default
 | `JUDGE_SHARED_SECRET` | — | Must match `wmoj-app`. Required in production. |
 | `AUTH_STRICT` | `false` | Set `true` in production to reject bad tokens. |
 | `PORT` | `4001` | |
+| `HOST_MEMORY_CEILING_MB` | `512` | Most memory the host can really back. Every submission's limit is clamped to this. Raise it on a bigger box. |
 
 ## Contributing
 

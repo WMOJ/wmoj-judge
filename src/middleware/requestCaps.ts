@@ -10,11 +10,17 @@ const MAX_INPUT_CASES = 200;
 const MAX_INPUT_BYTES_PER_CASE = 1_000_000;
 const MAX_OUTPUT_BYTES_PER_CASE = 1_000_000;
 const MAX_CODE_BYTES = 100_000;
+/**
+ * Custom checkers are C++ source too, and get the same 100 KB budget as
+ * a submission. Anything larger is a mistake, not a checker.
+ */
+const MAX_CHECKER_BYTES = 100_000;
 
 interface SubmitLikeBody {
   code?: unknown;
   input?: unknown;
   output?: unknown;
+  checker?: unknown;
 }
 
 /**
@@ -50,6 +56,17 @@ export function requestCaps(
         error: "payload too large",
         reason: "code exceeds 100KB",
         limit: MAX_CODE_BYTES,
+      });
+      return;
+    }
+  }
+
+  if (typeof body.checker === "string") {
+    if (byteLen(body.checker) > MAX_CHECKER_BYTES) {
+      res.status(413).json({
+        error: "payload too large",
+        reason: "checker exceeds 100KB",
+        limit: MAX_CHECKER_BYTES,
       });
       return;
     }

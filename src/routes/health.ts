@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { spawn } from "child_process";
+import { config } from "../config";
 import { logger } from "../util/logger";
 import { buildChildEnv } from "../sandbox/minimalEnv";
 import type { Language } from "../types";
@@ -109,9 +110,16 @@ export async function probeToolchainAtBoot(): Promise<void> {
 export const healthRouter: Router = Router();
 
 /**
- * GET /health — NO auth middleware. Returns { status: "ok" } (200) or
- * { status: "degraded", reason } (503). Cached for 30s so repeated
- * hits don't fork probes.
+ * GET /health — NO auth middleware. Returns
+ * `{ status: "ok", version }` (200) or
+ * `{ status: "degraded", reason, version }` (503). Cached for 30s so
+ * repeated hits don't fork probes.
+ *
+ * `status` is unchanged and remains the contract every existing caller
+ * (Render's probe, wmoj-app's `api/status/health`) reads. `version` is
+ * purely additive: it is `RENDER_GIT_COMMIT` in production, so polling
+ * /health from outside tells you exactly when a push went live. See
+ * `resolveVersion` in config.ts.
  */
 healthRouter.get("/", async (_req: Request, res: Response) => {
   const now = Date.now();
@@ -119,11 +127,12 @@ healthRouter.get("/", async (_req: Request, res: Response) => {
     cached = await computeHealth();
   }
   if (cached.ok) {
-    res.json({ status: "ok" });
+    res.json({ status: "ok", version: config.VERSION });
     return;
   }
   res.status(503).json({
     status: "degraded",
     reason: cached.failures.join(", "),
+    version: config.VERSION,
   });
 });

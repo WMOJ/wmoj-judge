@@ -25,6 +25,24 @@ export interface SubmitRequest {
   timeLimit?: number;
   memoryLimit?: number;
   compareMode?: CompareMode;
+  /**
+   * Optional C++ source for a custom checker (problems whose answer is
+   * not unique). Compiled once per submission with
+   * `g++ -O2 -std=gnu++17` and invoked per test case as
+   *
+   *   checker.out <input_file> <expected_file> <contestant_output_file>
+   *
+   * Exit codes follow the testlib/DMOJ convention: 0 = accepted,
+   * 1 = wrong answer, 2 = presentation error (treated as WA),
+   * 3 = checker internal error (verdict `IE`), any other non-zero = WA.
+   * The checker's stderr is surfaced per case as
+   * `TestResult.checkerMessage`.
+   *
+   * Absent, null, or empty ⇒ the byte comparison selected by
+   * `compareMode` is used, exactly as before checkers existed. When a
+   * checker IS supplied it REPLACES `compareMode` entirely.
+   */
+  checker?: string;
 }
 
 export interface TestResult {
@@ -40,12 +58,34 @@ export interface TestResult {
   timeMs: number;
   cpuMs: number;
   memKb: number;
+  /**
+   * Trimmed, ~1 KB-truncated stderr of the custom checker for this
+   * case. Present only when a `checker` was supplied AND the checker
+   * actually ran (the program exited cleanly) AND it wrote something to
+   * stderr. This is how a problem explains *why* an answer was rejected.
+   */
+  checkerMessage?: string;
 }
 
 export interface SubmitResponse {
   summary: { total: number; passed: number; failed: number };
   results: TestResult[];
+  /**
+   * The memory cap actually enforced on the sandbox, in MB:
+   * `min(requested ?? language default ?? 256, HOST_MEMORY_CEILING_MB)`.
+   * A problem may declare more than the host can back; this reports what
+   * was really applied.
+   */
+  effectiveMemoryLimitMb: number;
+  /** The user's code failed to compile. Their fault. */
   compileError?: string;
+  /**
+   * The problem's custom checker failed to compile. A problem-configuration
+   * fault, NOT the user's — deliberately a separate field from
+   * `compileError` so `wmoj-app` never synthesizes a `CE` that blames the
+   * student for our broken checker.
+   */
+  checkerError?: string;
 }
 
 export interface Executor {

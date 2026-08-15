@@ -29,6 +29,46 @@ const IS_PROD = NODE_ENV === "production";
 
 const cpuCount = Math.max(1, os.cpus().length);
 
+/**
+ * Epoch of this process, ISO-8601. Used as the "build timestamp" half of
+ * the fallback deployment marker (see `resolveVersion`). A redeploy
+ * always restarts the process, so this changes whenever new code goes
+ * live.
+ */
+const BOOTED_AT = new Date().toISOString();
+
+/**
+ * `version` from package.json, read at runtime rather than imported so
+ * the JSON stays outside tsconfig's `rootDir`. Resolves to
+ * `<repo>/package.json` from `src/` under tsx and to `/app/package.json`
+ * from `dist/` in the runtime image (the Dockerfile copies it there for
+ * `npm ci --omit=dev`).
+ */
+function readPackageVersion(): string {
+  try {
+    const pkg = require("../package.json") as { version?: unknown };
+    return typeof pkg.version === "string" ? pkg.version : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * Deployment marker surfaced by `GET /health` so a deploy can be
+ * detected from outside without shell access to the box.
+ *
+ * Render injects `RENDER_GIT_COMMIT` automatically on every build, so in
+ * production this is the exact SHA that is live. Off Render (local
+ * Docker, `npm run dev`) it falls back to
+ * `<package.json version>+<process start time>`, which still changes on
+ * every restart.
+ */
+function resolveVersion(): string {
+  const commit = process.env.RENDER_GIT_COMMIT;
+  if (commit !== undefined && commit.trim().length > 0) return commit.trim();
+  return `${readPackageVersion()}+${BOOTED_AT}`;
+}
+
 function readSharedSecret(): string {
   const raw = process.env.JUDGE_SHARED_SECRET;
   // Scrub the variable from process.env as soon as we've read it.
@@ -53,6 +93,7 @@ export interface JudgeConfig {
   readonly JUDGE_SHARED_SECRET: string;
   readonly AUTH_STRICT: boolean;
   readonly UID_POOL_SIZE: number;
+  readonly HOST_MEMORY_CEILING_MB: number;
   readonly GLOBAL_SUBMIT_CONCURRENCY: number;
   readonly PER_SUBMISSION_CONCURRENCY: number;
   readonly COMPILE_CACHE_TTL_MS: number;
@@ -62,6 +103,7 @@ export interface JudgeConfig {
   readonly NSJAIL_BIN: string;
   readonly SECCOMP_POLICY: string;
   readonly LOG_LEVEL: string;
+  readonly VERSION: string;
 }
 
 /**
@@ -88,6 +130,17 @@ export const config: JudgeConfig = Object.freeze({
   // UID_POOL_SIZE: unset in both .env.local and the Render dashboard
   // — default 16 applies.
   UID_POOL_SIZE: intEnv("UID_POOL_SIZE", 16),
+  // HOST_MEMORY_CEILING_MB: the most memory this host can actually back.
+  // The free Render instance has 512 MB of RAM total, so a submission
+  // asking for more than that could never be enforced -- the container's
+  // OOM killer would fire first and produce a confusing crash instead of
+  // an MLE. Every submission's cap is clamped to
+  // min(requested, HOST_MEMORY_CEILING_MB) and the clamped value is
+  // reported back as `effectiveMemoryLimitMb`. Raise it via env only on
+  // a host with more RAM.
+  // Unset in both .env.local and the Render dashboard — default 512
+  // applies.
+  HOST_MEMORY_CEILING_MB: Math.max(1, intEnv("HOST_MEMORY_CEILING_MB", 512)),
   // GLOBAL_SUBMIT_CONCURRENCY: how many /submit requests may run in
   // parallel. Default to host CPU count so multiple submissions can
   // still overlap at the submission level. Floor of 1 honours operator
@@ -125,4 +178,8 @@ export const config: JudgeConfig = Object.freeze({
   // LOG_LEVEL: unset in both .env.local and the Render dashboard —
   // default "info" applies.
   LOG_LEVEL: process.env.LOG_LEVEL ?? "info",
+  // VERSION: derived, not configured. RENDER_GIT_COMMIT is injected by
+  // Render on every build; off-Render it falls back to the package.json
+  // version plus this process's start time. Surfaced by GET /health.
+  VERSION: resolveVersion(),
 });

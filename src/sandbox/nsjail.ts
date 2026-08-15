@@ -16,6 +16,14 @@ import { config } from "../config";
  */
 const KILL_GRACE_MS = 5000;
 
+/**
+ * Fraction of the memory cap at which peak RSS counts as "hit the
+ * limit". Shared with `submit.ts`'s MLE classification so the sandbox
+ * and the verdict layer agree on the threshold. See the comment at the
+ * RSS check in `classifyKill` for why it isn't 1.0.
+ */
+export const MEM_LIMIT_RSS_RATIO = 0.98;
+
 interface NsjailMeta {
   exitReason?: string;
   maxRssKb?: number;
@@ -303,7 +311,7 @@ export async function runSandboxed(
  *   "wall time elapsed: N.NNs"          -> wall time
  *   "cpu time:        N.NNs"            -> cpu time
  *   "time >= soft limit"                -> RLIMIT_CPU hit (TLE)
- *   "maximum memory usage"              -> RLIMIT_AS hit (MLE)
+ *   "memory limit exceeded" / "oom-kill" -> memory cap hit (MLE)
  *
  * Lines that don't start with `[` are skipped defensively — nsjail's
  * own logger always prefixes with `[L][timestamp]` so anything else
@@ -319,7 +327,18 @@ function parseNsjailStderr(stderr: string): NsjailMeta {
     if (/time\s*>=\s*soft\s*limit/i.test(line) || /cpu\s*time\s*limit/i.test(line)) {
       meta.exitReason = meta.exitReason ?? "cpu-limit";
     }
-    if (/rlimit_as|memory\s*limit|maximum\s*memory/i.test(line)) {
+    // Memory-limit detection. `rlimit_as` used to be an alternative
+    // here, which is wrong twice over: nsjail's own startup lines echo
+    // the CONFIGURED rlimit (a limit being set is not a limit being
+    // hit), and RLIMIT_AS never produces a kill in the first place — it
+    // makes malloc/new fail, so the program exits non-zero on its own.
+    // Only phrases that describe the limit actually being EXCEEDED count.
+    // The real RLIMIT_AS case is caught downstream in submit.ts from the
+    // program's own allocation-failure stderr.
+    if (
+      /(?:memory\s*limit|maximum\s*memory)[^\n]*(?:exceed|reach|hit|over)/i.test(line) ||
+      /oom[-_\s]?kill/i.test(line)
+    ) {
       meta.exitReason = meta.exitReason ?? "mem-limit";
     }
 
@@ -360,11 +379,11 @@ function parseNsjailStderr(stderr: string): NsjailMeta {
  * Order of checks:
  *   1. Node's last-resort SIGKILL timer fired    -> TO  (stuck nsjail/kernel)
  *   2. nsjail reported RLIMIT_CPU / --time_limit -> TO
- *   3. nsjail reported RLIMIT_AS / mem-limit     -> OOM
+ *   3. nsjail reported a memory limit exceeded   -> OOM
  *   4. CPU time consumed >= user's timeLimitMs   -> TO  (authoritative)
  *   5. Clean exit (0, no signal) && CPU in budget -> null (AC/WA)
  *   6. Inner wall >= 3 * timeLimitMs             -> TO  (sleepy/blocked)
- *   7. Peak RSS over the memory cap              -> OOM
+ *   7. Peak RSS at >=98% of the memory cap       -> OOM
  *   8. Any fatal signal not explained above       -> SIG
  *   9. Null exit code (nsjail spawn fail)        -> SIG
  *  10. Otherwise                                  -> null
@@ -415,8 +434,13 @@ function classifyKill(args: {
   const innerWallMs = meta.wallTimeMs ?? wallMs;
   if (innerWallMs >= timeLimitMs * 3) return "TO";
 
+  // Peak RSS at (or within 2% of) the cap on a run that did NOT exit
+  // cleanly — the clean-exit guard above has already returned for those.
+  // The 2% band exists because RSS is sampled by the kernel at page
+  // granularity and a process that is being torn down for exceeding its
+  // limit rarely reports the round number exactly.
   const memLimitKb = memLimitMb * 1024;
-  if (meta.maxRssKb !== undefined && meta.maxRssKb >= memLimitKb) {
+  if (meta.maxRssKb !== undefined && meta.maxRssKb >= memLimitKb * MEM_LIMIT_RSS_RATIO) {
     return "OOM";
   }
 
