@@ -21,8 +21,9 @@ const activeWorkdirs = new Set<string>();
  * transfer ownership to the pool UID.
  *
  * The returned path is mode 0700 and owned by `uid:uid`, so only the
- * sandboxed child process can read or write inside it. Node itself runs
- * as root and can still access it for setup and teardown.
+ * sandboxed child process can read or write inside it. On Render, Node
+ * itself runs as UID 1000 -- the same UID the child gets -- so it can
+ * still access the directory for setup and teardown without a chown.
  */
 export async function createWorkdir(uid: number): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), WORKDIR_PREFIX));

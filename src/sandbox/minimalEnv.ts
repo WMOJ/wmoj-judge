@@ -1,10 +1,14 @@
 import type { Language } from "../types";
 
 /**
- * Minimal PATH exposed to child processes. Covers the toolchain
- * locations used by the Docker runtime stage (python3, pypy3, g++).
- * Intentionally narrow — children never see `/root/bin` or any
- * user-writable directory.
+ * Fallback PATH for child processes, used only when the judge's own
+ * PATH is unset. Covers the toolchain locations used by the Docker
+ * runtime stage (python3, pypy3, g++).
+ *
+ * NOTE: in practice this is never used. `buildChildEnv` below passes
+ * `process.env.PATH` through verbatim, so children see exactly the
+ * judge's PATH — not a narrowed one. Everything else in the child env
+ * IS a strict allow-list.
  */
 const DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 

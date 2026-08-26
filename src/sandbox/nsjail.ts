@@ -47,7 +47,9 @@ function cpuLimitSecFor(timeLimitMs: number): number {
 /**
  * Shell out to nsjail with the argv described in the plan.
  * Responsibilities:
- *   - Build argv: chroot, user, group, rlimits, seccomp, env whitelist.
+ *   - Build argv: disabled namespaces, --keep_caps, cwd, rlimits,
+ *     seccomp policy, env allow-list. Deliberately NO --chroot and no
+ *     --user/--group -- see the comments above the argv below.
  *   - Stream `opts.stdin` to the child, collect stdout/stderr.
  *   - Parse nsjail's own diagnostic output on --log_fd=3 (a dedicated
  *     pipe, separate from the child's stderr — see comment on the

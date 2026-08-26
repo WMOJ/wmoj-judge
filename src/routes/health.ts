@@ -90,8 +90,12 @@ async function computeHealth(): Promise<CachedHealth> {
 }
 
 /**
- * Best-effort eager probe at boot so operators notice toolchain issues
- * right away instead of only when a request arrives. Never throws.
+ * Eager probe at boot so operators notice toolchain issues right away
+ * instead of only when a request arrives.
+ *
+ * THROWS by design when any toolchain is missing or degraded, so
+ * server.ts's `main().catch(...)` exits 1 rather than booting a judge
+ * that would return IE for every submission.
  */
 export async function probeToolchainAtBoot(): Promise<void> {
   try {

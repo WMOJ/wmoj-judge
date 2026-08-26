@@ -1,270 +1,199 @@
 # wmoj-judge — agent guide
 
 The execution half of WMOJ. A **stateless, synchronous** HTTP service that compiles and runs
-untrusted competitive-programming submissions inside `nsjail` + seccomp and returns per-test
-verdicts in the same response.
+untrusted competitive-programming submissions inside `nsjail` + seccomp and returns per-test verdicts
+in the same response. **No database, queue, job IDs, callbacks, or persistence.**
 
-Node 20 · TypeScript (CommonJS) · Express 4 · Docker. Its only client is `wmoj-app`, authenticated
-with a static shared secret. **No database, queue, job IDs, callbacks, or persistence.**
+Node 20 · TypeScript 5.9 (**CommonJS**) · Express 4.21 · pino · Docker. Its only client is
+`wmoj-app`, authenticated with a static shared secret. `nanoid` 3 and `p-limit` 3 are pinned to CJS
+majors — **v4+ are ESM-only, do not bump**. nsjail is pinned to tag **3.3**, built from source.
 
 ## The constraint that explains this codebase
 
 It runs on a **free Render instance: 512 MB RAM, ~0.1 CPU**, in a container with no
 `CAP_SYS_ADMIN`/`CAP_SETPCAP` and no cgroup access. Nearly every limitation here — the disabled
-namespaces, serial test execution, the size caps, the compile cache — is a consequence of that host,
-not an oversight. Before "fixing" something that looks under-built, check whether it is load-bearing
-for this environment.
+namespaces, serial test execution, the size caps, the compile cache, CPU-time TLE — is a consequence
+of that host, not an oversight. Before "fixing" something that looks under-built, check whether it is
+load-bearing for this environment.
 
 ## Commands
 
 ```bash
 npm ci
-npm run build    # tsc → dist/ — the ONLY automated quality gate; keep it clean
+npm run build    # tsc → dist/ — builds AND typechecks; the ONLY automated gate
 npm run dev      # tsx watch (Linux only)
-npm run start
+npm start        # needs a build first
 docker build -t wmoj-judge .
 docker run --rm -p 4001:4001 -e JUDGE_SHARED_SECRET=… -e AUTH_STRICT=true wmoj-judge
 ```
 
-**No tests, no linter, no CI.** `tsc` runs with `strict` + `noUncheckedIndexedAccess`, so a clean
-build is a real bar — but behavioural changes must be checked by hand against a running container.
+**No lint, no test, no typecheck, no format script; no CI, no deploy manifest, zero test files.**
+Never claim otherwise. `tsc` runs with `strict` + `noUncheckedIndexedAccess`, so a clean build is a
+real bar — but behavioural changes must be checked by hand against a running container.
 
 - **Won't run natively on macOS** — nsjail is Linux-only. Use Docker.
-- **`.env.local` is intentionally not loaded** (no `dotenv`, no `--env-file`). There's no need for
-  strict auth locally, so local runs fall back to `AUTH_STRICT=false`. In production the vars come
-  from the Render dashboard.
+- **`.env.local` is intentionally not loaded** (no `dotenv`, no `--env-file`); local runs fall back
+  to `AUTH_STRICT=false`. Production vars come from the Render dashboard.
 - The judge **refuses to boot** unless `python3`, `pypy3`, and `g++` are all on `PATH`.
   `NODE_ENV=production` is baked into the image, so a missing `JUDGE_SHARED_SECRET` exits 1.
 
+## Skills
+
+Trigger-scoped detail lives in `.agents/skills/` (`.claude` symlinks to it). Load the matching
+skill *before* touching the area; each holds failure modes this file has no room for.
+
+| Skill | Load when |
+|---|---|
+| `sandbox-changes` | touching `src/sandbox/**`, `policy.kafel`, or the `Dockerfile` |
+| `custom-checkers` | touching `src/checker/`, the `checker` field, or authoring a checker |
+| `add-language` | adding or removing a language, or changing a compiler flag |
+| `verdicts-and-comparison` | touching `deriveVerdict`, the MLE rules, or `src/compare/` |
+| `judge-app-contract` | changing a request/response field, an env-var name, or a verdict string |
+
 ## API
 
-Three endpoints. `/health` is unauthenticated by design (Render probes); `/submit` and
-`/generate-tests` sit behind `auth → rateLimit → requestCaps`. There is **no 404 handler and no
-global error handler**, so unmatched paths return Express's default HTML.
+Middleware order (`src/server.ts`): `httpLogger → cors() → express.json({limit:"250mb"}) →
+in-flight counter → /health → [auth, rateLimit, requestCaps] → /submit, /generate-tests`. There is
+**no 404 handler and no global error handler**, so unmatched paths and over-250 MB bodies get
+Express's default **HTML**; gates mount with `app.use`, so even `GET /submit` runs auth first.
 
 **`POST /submit`** —
 `{language, code, input[], output[], timeLimit?, memoryLimit?, compareMode?, checker?}`;
 `input`/`output` must be equal-length string arrays. Returns 200 with
 `{summary:{total,passed,failed}, results[], effectiveMemoryLimitMb}`.
 
-`effectiveMemoryLimitMb` is the cap actually enforced —
-`min(requested ?? language default ?? 256, HOST_MEMORY_CEILING_MB)`. A problem may *declare* more
-than the host can back; this reports what was really applied. Present on **every** 200, including
-the two error shapes below.
+`effectiveMemoryLimitMb = max(1, min(requested ?? language default ?? 256, HOST_MEMORY_CEILING_MB))`
+is the cap actually enforced. Present on **every** 200, including both error shapes below.
 
-> **A compile error is also HTTP 200** — `{summary:{0,0,0}, results:[], compileError}`. This is
-> contractual; `wmoj-app` depends on it. 4xx/5xx means the request or the judge is wrong, never the
-> user's code.
-
-### Custom checkers (`checker`)
-
-For problems whose answer is not unique ("print any valid arrangement"), send the checker's **C++
-source** in `checker`. Absent, `null`, or blank ⇒ the byte comparison selected by `compareMode`,
-exactly as before checkers existed. That backwards compatibility is mandatory: every live problem
-today ships without a checker and none of them may change behaviour. When a checker *is* supplied it
-**replaces `compareMode` entirely**; the string comparison never runs.
-
-- Compiled **once per submission** (never per case) with
-  `/usr/bin/g++ -O2 -std=gnu++17 Checker.cpp -o checker.out`, the same hardcoded shape
-  `/generate-tests` uses for generators. Deliberately not routed through `Executor.compile()`, which
-  takes no filename and can only build `Main.cpp`.
-- Invoked per case as `checker.out <input_file> <expected_file> <contestant_output_file>` — three
-  real files in the workdir, passed relative to it (nsjail sets it as cwd). Scratch files are
-  removed after each case; 200 cases × 3 × 1 MB would not fit on this host otherwise.
-- Runs through **the same `runSandboxed` path as submissions** (a buggy checker must not hang or
-  escape the judge) with its own generous limits: **10 s CPU, 256 MB**.
-- Only runs when the contestant's program itself finished cleanly. A TLE/MLE/RE case never reaches
-  the checker.
-
-Exit codes are the testlib/DMOJ convention:
-
-| Exit | Meaning | wmoj-judge verdict |
-|---|---|---|
-| `0` | accepted | case passes |
-| `1` | wrong answer | `WA` |
-| `2` | presentation error | `WA` (no PE verdict here) |
-| `3` | checker internal error | **`IE`** |
-| other non-zero | — | `WA` |
-| checker killed / never ran | — | **`IE`** |
-
-The checker's **stderr** is trimmed, truncated to ~1 KB, and returned per case as
-`TestResult.checkerMessage` — that is how a problem explains *why* an answer was rejected. The key
-is omitted entirely when there is no checker or it said nothing.
-
-> **A checker that fails to compile is HTTP 200 with a top-level `checkerError`** —
-> `{summary:{0,0,0}, results:[], effectiveMemoryLimitMb, checkerError}`, exactly parallel to
-> `compileError`. **Never reuse `compileError` for this**: `wmoj-app` synthesizes a user-facing `CE`
-> from that field, and a broken checker is a problem-configuration fault, not the student's.
-
-`examples/checkers/any-valid-pair.cpp` is a working reference checker (plus fixtures in
-`examples/checkers/fixtures/`) covering all four exit codes; its header comment is the short version
-of this section.
-
-**Load-bearing ordering:** the checker is compiled *after* the compile cache is populated. The cache
-stores the whole workdir keyed on (language, user source, compile argv) — a checker binary sitting
-there at `put()` time would be served to a different problem whose contestant submitted the same
-source.
+> **A compile error is HTTP 200** — `{summary:{0,0,0}, results:[], compileError}`. **A checker that
+> fails to compile is HTTP 200 with a separate top-level `checkerError`.** Never merge the two:
+> `wmoj-app` synthesizes a user-facing `CE` from `compileError`, and a broken checker is a
+> problem-configuration fault, not the student's. 4xx/5xx means the request or the judge is wrong,
+> never the user's code.
 
 **`POST /generate-tests`** — `{code, language?}`. The generator prints a JSON array of inputs to
-**stdout** and expected outputs to **stderr**, equal length. Limits 60 s / 1 GB. It's *documented* as
-admin-only but not enforced here, and it **bypasses the global semaphore**.
+**stdout** and expected outputs to **stderr**, equal length; a compile failure is **400**, not 200.
+Limits 60 s / 1024 MB, passed straight through — bypassing the host clamp, so `RLIMIT_AS` is twice
+the box's RAM. Documented admin-only but **not enforced**, and it **bypasses the global semaphore**.
 
-**`GET /health`** — probes the three toolchains (2 s each, cached 30 s).
-`200 {"status":"ok", version}` or `503 {"status":"degraded", reason, version}`.
+**`GET /health`** — unauthenticated by design (Render probes). Probes the three toolchains (2 s
+each, cached 30 s): `200 {status:"ok", version}` or `503 {status:"degraded", reason, version}`.
+`version` is the deployment marker: `RENDER_GIT_COMMIT` if set, else package version + start time.
 
-`version` is the **deployment marker**: `RENDER_GIT_COMMIT` when Render sets it (so polling /health
-from outside tells you exactly when a push went live), otherwise the package.json version plus this
-process's start time. `status` is unchanged and remains what every existing caller reads — Render's
-probe and wmoj-app's `api/status/health` are untouched by the addition.
+## Size caps and the memory clamp
 
-## Size caps and test-case budget
-
-Enforced in `src/middleware/requestCaps.ts` (413 on violation):
+Enforced in `src/middleware/requestCaps.ts` (413 on violation), by UTF-8 `Buffer.byteLength`:
 
 | Limit | Value |
 |---|---|
 | Test cases per submission | **200** |
-| Bytes per single input | **1 MB** |
-| Bytes per single expected output | **1 MB** |
-| Source code | 100 KB |
-| Checker source | 100 KB |
+| Bytes per single input | **1,000,000** |
+| Bytes per single expected output | **1,000,000** |
+| Source code | 100,000 |
+| Checker source | 100,000 |
 
-These exist because the host has 512 MB of RAM and the whole payload is buffered in memory. WMOJ's
-**74 problems** are authored to fit: **8–65 cases (avg ~28)**, most inputs a few KB, heaviest around
-50–120 KB per case. The 50 CCC problems — the newest cohort and the one sized against these caps
-deliberately — run 15–55 cases (avg 25), largest case 119 KB, under 600 KB total. That is
-deliberately fewer and smaller than other sites hosting the same problems — coverage of core edge
-cases is the goal, not exhaustiveness. Two legacy problems exceed the 1 MB per-case cap and are
-therefore unsubmittable (413 before anything runs).
+The `express.json` 250 MB limit sits deliberately *above* the worst case these permit, so
+`requestCaps` returns its own 413 with a reason. Problems are authored to fit these caps; the corpus
+numbers describing them belong to `wmoj-app`.
 
-A `memoryLimit` above the host's total RAM can never actually be enforced, so the judge no longer
-pretends otherwise: every submission's cap is clamped to
-`min(requested, HOST_MEMORY_CEILING_MB)` (default **512**, env-overridable) and the clamped value is
-returned as `effectiveMemoryLimitMb`. A problem is free to declare its source contest's real limit;
-anything over 512 simply runs at 512 and gets a clean `MLE` rather than a confusing container-level
-crash. No live problem declares more than 512 today. The clamp applies to `/submit` only —
-`/generate-tests` keeps its own hardcoded 60 s / 1 GB generator limits.
+Every submission's cap is clamped to `min(requested, HOST_MEMORY_CEILING_MB)` (512, env-overridable)
+and returned as `effectiveMemoryLimitMb`. A problem may declare its contest's real limit; anything
+over 512 runs at 512 with a clean `MLE`, not a container crash. `/generate-tests` is exempt.
 
-## Sandbox — read before touching `src/sandbox/` or `policy.kafel`
+## Sandbox
 
-**Deliberately weaker than a textbook sandbox**, stripped down to run unprivileged:
-
-| Active | Disabled |
-|---|---|
-| seccomp BPF (`policy.kafel`) | all namespaces — user, net, mnt, pid, ipc, uts, cgroup |
-| rlimits (`as`/`cpu`/`nproc`/`nofile`/`fsize`/`core`) | chroot |
-| per-submission `0700` tmpdir | `--user`/`--group` (setuid to a pool UID) |
-| 4-var env allowlist | cgroups |
-
-Consequences to reason about:
+**Deliberately weaker than a textbook sandbox**, stripped down to run unprivileged. Active: seccomp
+BPF (`policy.kafel`), rlimits, a per-submission `0700` tmpdir, a 4-var env allowlist (`PATH`, `LANG`,
+`LC_ALL`, `PYTHONUNBUFFERED`). Disabled: **all seven namespaces** (user, net, mnt, pid, ipc, uts,
+cgroup), chroot, `--user`/`--group`, cgroups.
 
 - Every submission runs as **UID 1000 — the same UID as the Node process** — sharing its PID, mount,
-  and network namespaces.
-- The **UID pool is now just a concurrency gate**; the numeric UID only reaches a log line, `gid` is
-  never read.
-- **Network is blocked by seccomp alone.** No second layer.
-- `open`/`read`/`getdents64` are allowed with no path filtering and no chroot.
-- **Compilation is NOT sandboxed** — `g++` is spawned directly with no timeout and no rlimits, in
-  `executors/cpp.ts`, `routes/generateTests.ts`, and `checker/index.ts`. Only the *run* step goes
-  through nsjail. Checkers and generators are problem-setter source, i.e. the same trust boundary
-  as `/generate-tests` already assumed; contestant source has always been compiled unsandboxed too.
-
-### Load-bearing details that look like noise
-
-- **`--log_fd 3`** — nsjail's `[I]` log lines used to interleave byte-wise with generator stderr
-  (which also starts with `[`), destroying `/generate-tests`. Never route it back to stderr.
-- **`execve`/`execveat` must stay in the seccomp allowlist** — nsjail installs the filter *before*
-  exec, so removing them SIGSYS-kills every submission (exit 159).
-- **`DEFAULT ERRNO(38)` (ENOSYS) must not become `KILL` or `EPERM`** — `KILL` breaks glibc's syscall
-  probes; `EPERM` breaks `pthread_create`, which needs `clone3` to fail with ENOSYS so glibc falls
-  back to classic `clone()`.
-- **`USER 1000` in the Dockerfile** — running non-root skips nsjail's `prctl(PR_SET_SECUREBITS)`,
-  which would need `CAP_SETPCAP`. **Don't override `USER` in `docker run`** or everything exits 255.
-- **`UID_POOL_SIZE` must track the Dockerfile `useradd` loop** (`seq 1000 1015`, `BASE_UID = 1000`).
-- **The Debian trixie base can't be downgraded** — g++ 14 is needed for full `-std=c++23`; watch the
-  trixie-specific `libprotobuf32t64`.
-- TLE is decided from **CPU time**, not wall clock, so verdicts stay stable on a shared 0.1-CPU host.
-
-## Languages
-
-`languages.json` is the source of truth. `python3`, `pypy3` (384 MB default — its baseline RSS is
-~60 MB vs CPython's ~14 MB), and `cpp14/17/20/23` (`g++ -O2 -std=c++NN`). Legacy aliases
-`python`→`python3` and `cpp`→`cpp17` are still accepted for the wmoj-app cutover. `/generate-tests`
-always compiles `-std=gnu++17` and ignores the requested language. Java was removed; the JVM comments
-in `policy.kafel` are stale.
-
-**Adding one:** `languages.json` → `src/executors/<lang>.ts` → register in `executors/index.ts`, the
-`Language` union in `types.ts`, and `ALL_LANGUAGES` in `routes/submit.ts` → install in the Dockerfile
-*runtime* stage → add a `/health` probe → verify `policy.kafel` covers its startup syscalls.
+  and network namespaces. The UID pool is now just a concurrency gate.
+- **Network is blocked by seccomp alone.** There is no second layer.
+- `open`/`read`/`write`/`getdents64` are allowed with **no path filtering and no chroot**, and every
+  submission shares UID 1000 and one `/tmp` root, so **cross-submission isolation does not hold**.
+- **Compilation is NOT sandboxed** — `g++` is spawned directly with no timeout and no rlimits in
+  `executors/cpp.ts`, `checker/index.ts`, and `routes/generateTests.ts`. A compile bomb can OOM the
+  service, and `#include` of an arbitrary path leaks its contents through `compileError`. Only the
+  *run* step goes through nsjail.
+- Every flag, rlimit, and seccomp rule prevents one specific failure → **`sandbox-changes`**.
 
 ## Verdicts
 
-`deriveVerdict` returns `TLE | MLE | RE | IE | AC | WA`, and **the order of its checks is
-load-bearing**:
+`Verdict = AC | WA | TLE | MLE | RE | CE | IE`. **The order of `deriveVerdict`'s checks is
+load-bearing: TLE → MLE → RE → IE → WA/AC**, with MLE tested *before* the `exitCode !== 0` branch
+(the rationale is a 45-line comment at `submit.ts:181-226`, and in `verdicts-and-comparison`).
 
-```
-TLE → MLE → RE → IE → WA/AC
-```
+- `IE` is produced **only** by a custom checker that could not answer.
+- **`CE` is declared but never produced** — compile failures surface via
+  `compileError`/`checkerError`, and `wmoj-app` synthesizes its own `CE`.
+- A case passes only if `exitCode === 0 && killedBy === null` **and** the checker accepted (or, with
+  no checker, `compare(...)` matched) — correct output with a non-zero exit fails.
+- **No early exit** — every case runs after a failure. An `IE` case counts as failed in `summary`.
+- Default comparator `trim-trailing`. Partial scoring, subtasks, and interactive problems are not
+  supported; all scoring lives in `wmoj-app`.
 
-MLE is tested *before* the `exitCode !== 0` branch. That ordering is the whole fix for the old
-"MLE surfaces as RE" bug: limits are enforced with `--rlimit_as`, which caps **virtual address
-space, not resident memory**, so hitting it makes `malloc`/`new` *fail* rather than triggering a
-kill — the program throws, exits non-zero, and used to be labelled `RE`. Peak RSS can't rescue it
-either: RSS stays *below* the cap precisely because the allocation was refused.
+## Languages
 
-A case is `MLE` when **any** of these hold (see `isMemoryLimitExceeded` in `routes/submit.ts`):
-
-1. the sandbox classified the kill as `OOM` — nsjail reported a memory limit **exceeded**, or peak
-   RSS reached the cap;
-2. peak RSS ≥ **98%** of the *enforced* cap (`MEM_LIMIT_RSS_RATIO` in `sandbox/nsjail.ts`);
-3. the program exited non-zero **and** its stderr matches an allocation-failure signature —
-   `std::bad_alloc`, `bad_array_new_length`, `Cannot allocate memory`, `MemoryError`, `Killed`.
-
-Rules 2 and 3 are gated on the run *not* having finished cleanly, so a solution that exit(0)'d
-having used its whole budget stays `AC`. A plain `SIGSEGV` from a null-pointer bug has low RSS and
-no allocation signature, so it stays `RE`. The `mem-limit` regex no longer matches the literal
-string `rlimit_as` — a limit being *configured* is not a limit being *hit*.
-
-`IE` is produced **only** by a custom checker that could not answer (exit 3, or the checker itself
-crashed / timed out). `CE` is declared in `types.ts` but still **never produced** — compile failures
-surface via `compileError`/`checkerError`, and `wmoj-app` synthesizes its own `CE`.
-
-A test passes only if `exitCode === 0 && killedBy === null` **and** the checker accepted (or, with no
-checker, `compare(...)` matched); correct output with a non-zero exit fails.
-
-Comparison modes: `exact`, **`trim-trailing` (default)**, `whitespace`, `float-epsilon` (1e-6) —
-used only when no `checker` is supplied. **No early exit** — every case runs even after a failure.
-Custom checkers **are** supported (see the API section); partial scoring, subtasks, and interactive
-problems are not. All scoring lives in `wmoj-app`.
+`languages.json` is the source of truth: `python3`, `pypy3` (384 MB default), `cpp14/17/20/23`
+(`g++ -O2 -std=c++NN`). Legacy aliases `python`→`python3` and `cpp`→`cpp17` are still accepted for the
+wmoj-app cutover; Java was removed. Adding one touches eight places, one of which the compiler does
+**not** check for you → **`add-language`**.
 
 ## Concurrency & config
 
-Three throttles: `submitSemaphore` (CPU count, `/submit` only), a per-submission pool
-(**1 = serial**, deliberate — parallel runs on shared vCPUs made TLE non-deterministic), and the
-**16-UID pool, which is the true ceiling** and covers both gated endpoints. Backpressure is
-queue-never-reject: no depth cap, no admission control, no client-disconnect handling.
+Three throttles: `submitSemaphore` (p-limit at `os.cpus().length`, **`/submit` only**), a
+per-submission pool (**1 = serial**, deliberate — parallel runs on shared vCPUs made TLE
+non-deterministic), and the **16-UID pool, which is the true ceiling** and covers both gated
+endpoints. All in-process promise scheduling — no worker_threads, no queue workers. Backpressure is
+**queue-never-reject**: no depth cap, no timeout, no disconnect handling; a burst past the rate
+limiter queues indefinitely with the connection held open.
 
-`src/config.ts` is the **only** place that reads `process.env`; everything else imports the frozen
-`config`. In practice only `JUDGE_SHARED_SECRET` and `AUTH_STRICT` are ever set — every other var
-runs on its default, and each is tagged inline. Preserve those comments. Two derived values live
-there too: `HOST_MEMORY_CEILING_MB` (512, the real ceiling every submission's cap is clamped to) and
-`VERSION` (the `/health` deployment marker; reads `RENDER_GIT_COMMIT`, else package.json's version
-plus process start time, via a runtime `require("../package.json")` so the JSON stays outside
-tsconfig's `rootDir`).
+`src/config.ts` is the env boundary — everything else imports the frozen `config`. One exception:
+`sandbox/minimalEnv.ts:26` reads `process.env.PATH`. `intEnv` silently falls back on unparseable
+values; `readSharedSecret()` deletes the var from `process.env` after reading it. Each var carries an
+inline comment recording that it is unset in both `.env.local` and Render — **preserve those**.
 
-`AUTH_STRICT` **defaults to `false` (fail-open)**, so always set it to `true` in production. CORS is
-wide open (`*`) and the secret is the only gate — never call this service from browser code. Rate
-limiting is 60/min shared across both gated routes, and since there's no `trust proxy` and every
-wmoj-app request carries the same token, the whole application shares one bucket.
+`AUTH_STRICT` **defaults to `false` (fail-open)**, and in soft mode a **missing** token is let
+through too, not just a wrong one. Always `true` in production — and only there, since outside it the
+secret is `""`, which strict mode rejects everything against. CORS is wide open (`*`) and the secret
+is the only gate, so **never call this service from browser code**. Rate limiting is 60/min across
+both gated routes; with no `trust proxy` and one token, all of wmoj-app shares one bucket.
+
+Graceful shutdown: `SIGTERM`/`SIGINT` → both routes 503 at once → `server.close()` → wait up to
+`DRAIN_TIMEOUT_MS = 29_000` (1 s inside Render's window) → `rm -rf` workdirs → flush pino → exit 0.
+
+## Code conventions
+
+Verified repo-wide by exhaustive grep — match them.
+
+- CommonJS, **no `.js` extensions in imports**; **named exports only** (zero `export default` in
+  `src/`); `import type` used consistently even though `verbatimModuleSyntax` is off.
+- **Zero `any`, and zero TODO/FIXME/HACK/XXX markers.** Known weaknesses are written out as prose in
+  JSDoc, not parked behind a marker.
+- **No custom error classes, no `next(err)`, no Express error middleware.** Failures are discriminated
+  result objects (`{ok:true, value} | {ok:false, error}`); each route is one `try/catch/finally` that
+  logs and returns `500 {error: message}`.
+- **Manual validation, no zod** — `unknown` narrowed by hand, then cast explicitly. Structured pino
+  logging throughout, with the token redacted under three header spellings.
+- **Heavy JSDoc-`why` comments naming the specific failure the code prevents** — the strongest
+  stylistic signature here. Preserve it; never leave a comment that contradicts its own file.
+- `noUncheckedIndexedAccess` makes every `arr[i]` a `T | undefined` — hence `payload.output[i] ?? ""`.
+  Markdown hard-wraps at ~100 columns.
+
+Commits: Conventional Commits — lowercase, imperative, no trailing period, optional scope
+(`(sandbox)` dominates). Subjects pack the reason in via a `so <consequence>` clause; substantive
+commits carry a hard-wrapped ~76-col body. **Zero trailers of any kind — no `Co-authored-by`, no
+`Generated with`. Never add them.**
 
 ## Requires a decision, not a drive-by change
 
 1. `policy.kafel` — state which syscalls move and why.
 2. The nsjail argv — disabled namespaces, `--keep_caps`, `--log_fd 3`, absent `--user`/`--chroot`.
 3. The Dockerfile's `USER 1000`, useradd loop, trixie base, `libprotobuf32t64`.
-4. The `/submit` contract — compile errors stay HTTP 200 with `compileError`, checker compile
-   errors HTTP 200 with `checkerError`, and the two must never be merged. **Cross-repo breaking
-   change**; coordinate with `wmoj-app`.
+4. The `/submit` contract — compile errors stay HTTP 200 with `compileError`, checker compile errors
+   HTTP 200 with `checkerError`, and the two must never be merged. **Cross-repo breaking change**;
+   coordinate with `wmoj-app`.
 5. The legacy `python`/`cpp` aliases.
 6. Never widen the seccomp allowlist, the compile trust boundary, or the env allowlist just to make
    something work.
@@ -272,28 +201,48 @@ wmoj-app request carries the same token, the whole application shares one bucket
 ## Known issues (don't rediscover; not currently being fixed)
 
 - `config.ts` deletes `JUDGE_SHARED_SECRET` from `process.env`, but `unsetenv()` only drops the
-  pointer — the string stays in the process's env memory. With shared UID 1000, no PID namespace, and
-  allowed `open`/`read`, user code can plausibly read it from `/proc/<pid>/environ`. Unverified.
-- Unsandboxed, untimed compilation → a compile bomb can OOM the service. `#include` of arbitrary
-  paths leaks file contents through `compileError`.
-- All submissions share UID 1000 and one `/tmp` root, so cross-submission isolation doesn't hold.
-- `cpuMs`/`memKb` may silently be `0` if nsjail's log format doesn't match `parseNsjailStderr`'s
-  regexes. (**Fixed:** the `mem-limit` regex no longer matches the literal `rlimit_as`, and MLE no
-  longer surfaces as RE — see Verdicts for the three-rule classification that replaced it.)
-- The compile cache can be evicted between `get()` and `fs.cp()` (500 instead of a recompile) and
-  leaks disk across restarts (no boot sweep, no size cap).
-- `timeLimit`/`memoryLimit` have no upper bound. `/generate-tests` validates `language` then ignores
-  it. Dead: `SandboxOpts.chrootDir`/`rlimitAsMb`/`gid`, `buildChildEnv(_lang)`, `chownTree`.
+  pointer — the string stays in the process's env memory. With shared UID 1000, no PID namespace,
+  and allowed `open`/`read`, user code can plausibly read it from `/proc/<pid>/environ`. Unverified.
+- Unsandboxed, untimed compilation; one shared UID and one shared `/tmp` root (see Sandbox).
+- The compile cache can be evicted between `get()` and `fs.cp()` (a 500 instead of a recompile) and
+  has **no size cap** (TTL-only, 15 min, no LRU). It does *not* leak across restarts: `startupSweep()`
+  removes every `os.tmpdir()` entry starting with `judge-` — which includes the default
+  `/tmp/judge-cache` — and `server.ts` runs it before `startCompileCache()`. So a boot sweep "fixing"
+  the leak is dead code, and moving `COMPILE_CACHE_DIR` off the `judge-` prefix *introduces* one.
+- `timeLimit`/`memoryLimit` have no upper bound. `/generate-tests` validates `language`, then
+  ignores it.
+- **`PYTHONHASHSEED` is not set**, so CPython/PyPy hash randomization stays on and set/dict iteration
+  order varies run to run — any problem whose expected output depends on it is flaky.
 
 ## Related repo
 
 `wmoj-app` — the Next.js client, with its own `AGENTS.md`. It calls this service only from
-server-side route handlers with `X-Judge-Token`.
+server-side route handlers with **`X-Judge-Token`**, and `JUDGE_SHARED_SECRET` must be identical on
+both sides (constant-time compare; a length mismatch short-circuits before `timingSafeEqual`).
 
 ---
 
-**Keeping this current:** if you notice anything here that is outdated, stale, wrong, or missing —
-update it as part of your change. A fixed issue, a moved sandbox flag or seccomp rule, a new language
-or env var, a changed contract, a claim you verified or disproved against a real container, or
-knowledge you had to discover the hard way all belong here. This file is only useful while it is
-accurate; treat letting it go stale as leaving the work unfinished.
+## Maintenance
+
+Keep this file current, and keep it at or under **250 lines**. AGENTS.md is updated in the same
+commit as the code — `88640cd` shipped the checkers feature and its AGENTS.md changes together — and
+letting it go stale is leaving the work unfinished.
+
+⚠️ **Maintenance here is ZERO-SUM.** The line budget is the point, not an accident: a file nobody
+finishes reading is a file that does not guide anything. So the test for whether something belongs
+in AGENTS.md is not "is this true and useful" — almost everything is — it is:
+
+> **Is this worth removing something else to make room for?**
+
+If the answer is no, it does not go here. If the answer is yes, name what you are cutting and cut it
+in the same change. Only when there is genuinely spare room may you add without removing.
+
+Three questions settle most cases:
+
+1. **Does it have a detectable trigger?** ("when touching the seccomp policy", "when adding a
+   language") → it belongs in a skill, where it loads exactly when it is needed and costs nothing
+   when it is not. This is the default answer; prefer it.
+2. **Is it broad and unconditional** — something every change in this repository must respect
+   regardless of what it touches? → it belongs here.
+3. **Otherwise** → it is bloat. Delete it, or leave it as a comment beside the code it describes,
+   which is where a narrow fact stays honest for longest.

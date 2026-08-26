@@ -1,28 +1,30 @@
 // wmoj-judge unified seccomp policy (Kafel) -- amd64 (Render target)
 //
-// Covers Python 3, PyPy 3, compiled C++ binaries, and the JVM. One
-// policy for all five languages.
+// Covers Python 3, PyPy 3, and compiled C++ binaries -- one policy for
+// all six language IDs (python3, pypy3, cpp14/17/20/23). Java was
+// removed from the judge; the JVM notes further down are historical.
 //
 // Strategy: permissive DEFAULT with explicit denylist.
-//   - DEFAULT is ERRNO(1) (EPERM), not KILL. Unknown syscalls return -1
-//     to user code instead of SIGSYS-killing the whole process. This is
-//     the posture Docker, systemd (SystemCallFilter), and Kubernetes
-//     (RuntimeDefault) all use.
-//   - An explicit DENY block (also ERRNO(1)) documents the syscalls we
-//     never want to succeed. It is belt-and-suspenders to DEFAULT ERRNO
-//     and makes the security contract legible in the file itself.
-//   - The ALLOW block is the fast-path: syscalls the five runtimes
-//     (Python 3, PyPy 3, C++14/17 binaries, OpenJDK 17) are known to
-//     call on every run. Kept so that common paths never pay the
+//   - DEFAULT is ERRNO(38) (ENOSYS), not KILL -- see the USE line at the
+//     bottom of this file for why ENOSYS specifically. Unknown syscalls
+//     return -1 to user code instead of SIGSYS-killing the whole
+//     process. This is the posture Docker, systemd (SystemCallFilter),
+//     and Kubernetes (RuntimeDefault) all use.
+//   - An explicit DENY block (ERRNO(1), EPERM) documents the syscalls we
+//     never want to succeed, and gives applications the errno they
+//     expect on them. It is belt-and-suspenders to the DEFAULT and makes
+//     the security contract legible in the file itself.
+//   - The ALLOW block is the fast-path: syscalls the runtimes are known
+//     to call on every run. Kept so that common paths never pay the
 //     filter-evaluation cost of falling through to DEFAULT.
 //
-// Why not DEFAULT KILL with a big ALLOW list? Because modern glibc/libc
-// on bullseye (2.31+) probes rseq, statx, faccessat2, close_range,
-// clone3, openat2 -- none of which Kafel 3.3 knows about in its amd64
-// syscall table. Under DEFAULT KILL, every probe SIGSYS-kills the
-// process before main() runs (exit 159 = 128+31). Under DEFAULT ERRNO,
-// glibc gets EPERM, transparently falls back to the classic syscall
-// (newfstat, faccessat, close, fork, openat), and execution continues.
+// Why not DEFAULT KILL with a big ALLOW list? Because modern glibc
+// probes rseq, statx, faccessat2, close_range, clone3, openat2 -- none
+// of which Kafel 3.3 knows about in its amd64 syscall table. Under
+// DEFAULT KILL, every probe SIGSYS-kills the process before main() runs
+// (exit 159 = 128+31). Under DEFAULT ERRNO, glibc gets an errno back,
+// transparently falls back to the classic syscall (newfstat, faccessat,
+// close, fork, openat), and execution continues.
 //
 // References: google/kafel syscall_amd64.c, Judge0/isolate, DMOJ's
 // executor/cptbox, nsjail examples.
@@ -66,7 +68,7 @@ POLICY wmoj_judge {
     vhangup, ioperm, iopl
   },
 
-  // ---- Fast-path ALLOW: the hot set all five runtimes actually use -----
+  // ---- Fast-path ALLOW: the hot set the runtimes actually use ----------
   ALLOW {
     // ---- Process lifecycle ----
     // execve / execveat: nsjail's subproc::newProc installs the
