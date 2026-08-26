@@ -20,6 +20,22 @@
 //     3  checker internal error -> verdict IE; the PROBLEM is at fault
 //     any other non-zero      -> wrong answer
 //
+// Anything >= 128 is NOT a verdict: nsjail reports a checker that died
+// by a signal as its own `128 + WTERMSIG` status (139 SIGSEGV, 134
+// SIGABRT, 159 SIGSYS from a syscall outside policy.kafel) and exits 255
+// when it could not exec the checker at all. wmoj-judge treats all of
+// those as IE. Do not use them as verdicts.
+//
+// !! THE EXIT CODES ARE TESTLIB'S; THE ARGUMENT ORDER IS NOT. !!
+// Upstream testlib.h binds argv[2] to the PARTICIPANT's output and
+// argv[3] to the JURY's answer. wmoj-judge passes them the other way
+// round, as written above. A checker lifted from a testlib problem
+// therefore ends up validating the jury's own answer -- which is valid
+// by construction -- so it exits 0 on every case and every submission to
+// that problem silently scores 100%, with nothing in the response to
+// distinguish it from an easy problem. Swap the two answer files when
+// adapting a testlib checker.
+//
 // Whatever the checker writes to stderr is trimmed, truncated to ~1 KB,
 // and returned to the caller as TestResult.checkerMessage. That is where
 // you explain WHY an answer was rejected -- use it.
@@ -42,6 +58,7 @@
 // <bits/stdc++.h>, so it also compiles under clang for local testing.
 // ---------------------------------------------------------------------
 
+#include <cstddef>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -71,7 +88,14 @@ bool readAnswer(std::istream& in, bool& impossible, long long& i,
   } else {
     impossible = false;
     try {
-      i = std::stoll(token);
+      // std::stoll parses a numeric PREFIX and discards the rest, so
+      // std::stoll("1abc") is 1 with no exception. Checking that the
+      // whole token was consumed is what stops "1abc 2" being read as
+      // the pair (1, 2) and ACCEPTED -- by a checker that goes out of
+      // its way to reject surplus output thirty lines below.
+      std::size_t consumed = 0;
+      i = std::stoll(token, &consumed);
+      if (consumed != token.size()) return false;
     } catch (...) {
       return false;
     }

@@ -2,34 +2,34 @@ import type { Executor, Language } from "../types";
 import { pythonExecutor } from "./python";
 import { pypyExecutor } from "./pypy";
 import { createCppExecutor } from "./cpp";
-import { logger } from "../util/logger";
 
 const cpp14Executor = createCppExecutor("cpp14");
 const cpp17Executor = createCppExecutor("cpp17");
 const cpp20Executor = createCppExecutor("cpp20");
 const cpp23Executor = createCppExecutor("cpp23");
 
-// Process-lifetime flags so legacy-code warnings fire at most once per
-// language per judge instance rather than on every request.
-let warnedLegacyPython = false;
-let warnedLegacyCpp = false;
-
 /**
  * Resolve an Executor for a submission language.
  *
- * Accepts the canonical 6-language set plus the two legacy codes that
- * the wmoj-app may still send during the cutover window:
- *   - "python" -> routed to the python3 executor
- *   - "cpp"    -> routed to the cpp17 executor
+ * Takes a **canonical** `Language` only. The two legacy codes the
+ * wmoj-app may still send during the cutover window — `"python"` and
+ * `"cpp"` — are mapped, and their once-per-process deprecation warning
+ * emitted, by `normalizeLanguage` in `routes/submit.ts`, which is the
+ * only thing that ever sees the raw request value.
  *
- * Each legacy route emits a single warn-level log line per process on
- * first use (via the shared pino logger so it shows up in the same
- * structured stream as everything else). No silent drops; unknown
- * codes throw so the caller can turn them into a 400.
+ * This function used to carry `case "python"` / `case "cpp"` branches
+ * with those warnings in them, and they were **dead**: the sole call
+ * site normalises first, so neither branch ever executed and no
+ * deprecation warning was ever emitted for any request in the life of
+ * the alias. That is the one signal that would say whether the cutover
+ * is finished, and removing the aliases is listed in `AGENTS.md` as a
+ * decision — which was being made blind. Narrowing the parameter to
+ * `Language` is what keeps it from silently coming back: passing a raw
+ * request value here is now a compile error.
+ *
+ * Unknown codes throw so the caller can turn them into a 400.
  */
-export function executorFor(
-  language: Language | "python" | "cpp",
-): Executor {
+export function executorFor(language: Language): Executor {
   switch (language) {
     case "python3":
       return pythonExecutor;
@@ -43,22 +43,6 @@ export function executorFor(
       return cpp20Executor;
     case "cpp23":
       return cpp23Executor;
-    case "python":
-      if (!warnedLegacyPython) {
-        warnedLegacyPython = true;
-        logger.warn(
-          'deprecation: language code "python" is legacy; map to "python3"',
-        );
-      }
-      return pythonExecutor;
-    case "cpp":
-      if (!warnedLegacyCpp) {
-        warnedLegacyCpp = true;
-        logger.warn(
-          'deprecation: language code "cpp" is legacy; map to "cpp17"',
-        );
-      }
-      return cpp17Executor;
     default: {
       const _exhaustive: never = language;
       void _exhaustive;

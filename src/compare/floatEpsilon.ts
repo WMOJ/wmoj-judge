@@ -29,8 +29,10 @@ export function compareFloatEpsilon(expected: string, received: string): boolean
 }
 
 function tokenize(s: string): string[] {
-  // Trim to avoid leading/trailing empty tokens from split.
-  const trimmed = s.replace(/^\s+|\s+$/g, "");
+  // Trim to avoid leading/trailing empty tokens from split. Uses `trim()` rather than
+  // `/^\s+|\s+$/g` for the same reason as `trimTrailing.ts`'s `rightTrim`: the `\s+$` half is a
+  // greedy class anchored at `$` and backtracks quadratically on a long interior whitespace run.
+  const trimmed = s.trim();
   if (trimmed.length === 0) return [];
   return trimmed.split(/\s+/);
 }

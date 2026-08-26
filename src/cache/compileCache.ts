@@ -42,8 +42,11 @@ async function copyDir(src: string, dst: string): Promise<void> {
 
 /**
  * TTL-evicting compile cache. Artifacts live under
- * `config.COMPILE_CACHE_DIR/<key>/` and are reclaimed either on expiry
- * (checked every 60s) or when `shutdown()` is called.
+ * `config.COMPILE_CACHE_DIR/<key>/` and are reclaimed on expiry, by the
+ * sweep that runs every 60s. Nothing reclaims them at shutdown — the
+ * process exits and `startupSweep()` removes the whole `judge-` prefixed
+ * tree (which the default cache dir, `/tmp/judge-cache`, sits inside)
+ * before the next boot repopulates it.
  */
 class DiskCompileCache implements CompileCache {
   private readonly entries = new Map<string, CacheEntry>();
@@ -76,19 +79,44 @@ class DiskCompileCache implements CompileCache {
       await fs.rm(entry.dir, { recursive: true, force: true }).catch(() => {});
       return null;
     }
+    // A live map entry is not proof the artifact is still on disk: the
+    // eviction sweep, a `put()` that failed part-way, or anything else
+    // with write access to /tmp can remove the directory underneath it.
+    // The caller's next move is `fs.cp()` from this path, which rejects
+    // ENOENT and turns a submission that compiled perfectly into a 500 —
+    // or, worse, copies a partially-removed tree and grades every case
+    // `RE` on a clean 200. A missing directory must be a cache MISS, so
+    // the submission simply recompiles.
+    try {
+      await fs.access(entry.dir);
+    } catch {
+      this.entries.delete(key);
+      return null;
+    }
     return entry.dir;
   }
 
   /**
-   * Copy `artifactDir` into the cache under `key` and return the new
-   * cached path. Overwrites any existing entry for the same key.
+   * Copy `artifactDir` into the cache under `key` and return the cached
+   * path.
    *
-   * Atomic staging: write into a temp dir, then rm+rename. Concurrent
-   * readers (`fs.cp` from the cache path in routes/submit.ts) therefore
-   * see either the previous complete artifact or the new complete one,
-   * never a half-populated directory. The small rm→rename window still
-   * exists but a reader that races it just gets a cache miss from
-   * `get()` (which re-checks the in-memory map) — harmless.
+   * Atomic staging: write into a temp dir, then rename it into place.
+   * Concurrent readers (`fs.cp` from the cache path in
+   * routes/submit.ts) therefore see either no entry at all or one
+   * complete artifact, never a half-populated directory.
+   *
+   * `key` is a content hash of (language, source, compile argv), so
+   * whatever already sits at `dst` is byte-identical to what we just
+   * staged. That is why this NEVER removes an existing `dst`: the
+   * previous version did, and the resulting rm-then-rename window was
+   * open while the map entry still pointed at `dst`, so a third
+   * submission of the same source could `fs.cp` from a directory being
+   * deleted (500), copy a tree with the source but no binary (`RE` on
+   * every case, HTTP 200), or — if the rename then failed on a full
+   * /tmp — leave the entry pointing at a directory that no longer
+   * exists, 500ing every submission of that source for the rest of the
+   * 15-minute TTL with no self-healing. The loser of the race discards
+   * its own staging directory and adopts the winner's tree.
    */
   async put(key: string, artifactDir: string): Promise<string> {
     await this.ensureBase();
@@ -99,12 +127,24 @@ class DiskCompileCache implements CompileCache {
     );
     try {
       await copyDir(artifactDir, tmp);
-      // fs.rename cannot replace a non-empty directory on POSIX; remove
-      // any existing entry first, then move the staged dir into place.
-      await fs.rm(dst, { recursive: true, force: true }).catch(() => {});
-      await fs.rename(tmp, dst);
+      try {
+        await fs.rename(tmp, dst);
+      } catch (err) {
+        // POSIX rename refuses to replace a non-empty directory. That
+        // means a concurrent put() for the same content hash got there
+        // first; keep its identical tree and drop ours.
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== "ENOTEMPTY" && code !== "EEXIST" && code !== "EISDIR") {
+          throw err;
+        }
+        await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+      }
     } catch (err) {
       await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+      // Whatever is at `dst` after a failed put is not something we can
+      // vouch for, and submit.ts only logs this rejection at warn — so
+      // drop the entry rather than leaving a live pointer to it.
+      this.entries.delete(key);
       throw err;
     }
     this.entries.set(key, { dir: dst, expiresAt: Date.now() + this.ttlMs });
@@ -127,7 +167,7 @@ class DiskCompileCache implements CompileCache {
 
   /**
    * Remove expired entries both from the in-memory map and from disk.
-   * Called both by the background timer and by `shutdown()`.
+   * Only ever called by the background timer started in `start()`.
    */
   private async evictExpired(): Promise<void> {
     const now = Date.now();
@@ -150,7 +190,9 @@ class DiskCompileCache implements CompileCache {
 
   /**
    * Stop the eviction timer. Called from shutdown.ts. Does not touch
-   * on-disk artifacts — they're safe to leave for the next boot.
+   * on-disk artifacts: the next boot's `startupSweep()` removes them,
+   * because every `judge-` prefixed entry under os.tmpdir() goes, and
+   * the default cache dir is `/tmp/judge-cache`.
    */
   shutdown(): void {
     if (this.evictionTimer) {
@@ -174,7 +216,7 @@ export function startCompileCache(): void {
   compileCache.start();
 }
 
-/** Stop the background eviction timer. Call from shutdown. */
+/** Stop the background eviction timer. Called by `shutdown()` in util/shutdown.ts. */
 export function stopCompileCache(): void {
   compileCache.shutdown();
 }

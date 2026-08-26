@@ -113,7 +113,23 @@ POLICY wmoj_judge {
     capget,
     sched_yield,
     sched_getaffinity,
-    sched_setaffinity,
+
+    // sched_setaffinity takes a pid, and a non-zero pid means "some
+    // other process". --user/--group are absent, so every submission
+    // runs as UID 1000 -- the same UID as the Node judge -- and there
+    // is no PID namespace, so a submission can walk /proc and name any
+    // of them. TLE here is decided from CPU time, which affinity does
+    // not change, but the wall backstops are not immune: pin a
+    // concurrently running submission onto one contended core and it
+    // can cross nsjail's --time_limit or the 3x-wall rule, so another
+    // student's correct solution comes back TLE with nothing in the
+    // logs to explain it. pid == 0 ("myself") is the only form a
+    // submission has any business using; a non-zero pid matches no rule
+    // and falls through to DEFAULT ERRNO(38). sched_getaffinity above
+    // stays unfiltered on purpose -- it only reads a CPU mask, and
+    // glibc's get_nprocs() and CPython's os.cpu_count() go through it.
+    sched_setaffinity { pid == 0 },
+
     sched_getparam,
     sched_getscheduler,
     sched_get_priority_max,
@@ -212,19 +228,69 @@ POLICY wmoj_judge {
     lchown,
     umask,
 
-    // ioctl was previously cmd-filtered; under DEFAULT ERRNO the cost of
-    // a narrow filter is negligible, but removing the filter lets the
-    // JVM / Python runtimes do more TTY / FD queries without surprise
-    // EPERM. Unlisted dangerous ioctl commands (TIOCSTI etc.) do not
-    // represent a sandbox escape here because the only open fds point
-    // to the jailed workdir, pipes, and /dev/null from nsjail.
+    // ioctl was previously cmd-filtered. It is unfiltered now so the
+    // runtimes' terminal probes never come back with an error they did
+    // not expect: CPython and PyPy both isatty() stdin/stdout/stderr
+    // while building sys.std*, which is an ioctl(TCGETS) per fd on
+    // every single run.
+    //
+    // The justification that used to sit here was wrong, and it cited
+    // the JVM this judge no longer runs. It claimed dangerous commands
+    // (TIOCSTI etc.) have no target "because the only open fds point to
+    // the jailed workdir, pipes, and /dev/null from nsjail". They do
+    // not: there is no --chroot and no path filter on open/openat, so
+    // the child can open anything UID 1000 can reach -- /app, /proc,
+    // another submission's workdir (AGENTS.md, "Sandbox").
+    //
+    // What actually holds is narrower, and it is about fds, not paths.
+    // The judge gives the child pipes for fds 0/1/2, spawns the runner
+    // detached so setsid() has already dropped any controlling
+    // terminal, and setsid/setpgid are absent from this ALLOW block, so
+    // the child cannot become a session leader and acquire one: /dev/tty
+    // is ENXIO, and a TIOCSTI has nowhere to land except a pty the child
+    // opened for itself. The container's /dev carries no block device,
+    // no /dev/net/tun and no /dev/kvm. If a real tty, a new device node,
+    // or setsid ever reaches the child, this needs a cmd filter again.
     ioctl,
 
     // ---- Process info / resource reporting ----
     getrusage,
     getrlimit,
-    prlimit64,
+
+    // prlimit64 is filtered to pid == 0 ("myself"). The self form has
+    // to stay: glibc 2.34+ implements getrlimit/setrlimit on top of
+    // prlimit64 with pid 0, and reads RLIMIT_STACK through it before
+    // main() runs, so denying it stops every runtime before it starts.
+    //
+    // The foreign-pid form has to go. The kernel lets one process LOWER
+    // another's limits on a full UID match without CAP_SYS_RESOURCE;
+    // --user/--group are absent so every submission shares UID 1000
+    // with the Node judge, and there is no PID namespace, so /proc
+    // hands out the targets. prlimit64(victim, RLIMIT_CPU, {1,1}) --
+    // below the CPU that victim has already burned -- delivers SIGXCPU
+    // at once, so another student's correct solution comes back RE with
+    // nothing in the logs; prlimit64(node_pid, RLIMIT_NOFILE, {0,0})
+    // leaves a judge that still answers /health "ok" while every
+    // workdir write, compile-cache write and socket accept fails.
+    // Whether the foreign path actually reaches its victim also depends
+    // on the host's kernel.yama.ptrace_scope (the victim is a sibling,
+    // not a descendant, so scope 1 already blocks it) -- we do not set
+    // it and Render does not tell us, which is exactly why this is
+    // filtered rather than argued about.
+    //
+    // pid is a 4-byte argument, so Kafel compares only the low 32 bits
+    // of the register -- the same bits the kernel truncates to pid_t,
+    // so there is no high-half bypass in either direction. A non-zero
+    // pid matches no rule and falls through to DEFAULT ERRNO(38).
+    prlimit64 { pid == 0 },
+
+    // setrlimit is deliberately NOT filtered: it has no pid argument
+    // and only ever acts on the caller, and nsjail sets every --rlimit_*
+    // with rlim_cur == rlim_max, so raising one back up needs
+    // CAP_SYS_RESOURCE the child does not have. glibc and CPython's
+    // resource module both reach it.
     setrlimit,
+
     sysinfo,
     newuname,
 
@@ -247,8 +313,22 @@ POLICY wmoj_judge {
     timerfd_gettime,
     timerfd_settime,
 
-    // ---- Shared memory -- JVM uses memfd_create for CDS ----
-    memfd_create,
+    // ---- Shared memory: memfd_create is deliberately absent ----
+    // It was here for one reason -- the JVM's class-data-sharing
+    // archive -- and Java was removed from the judge, so the reason went
+    // with it. python3, pypy3 and a g++ binary do not need it, and it
+    // was the one allowed way to hold RAM the judge cannot see: a memfd
+    // is shmem-backed, so its pages are charged to neither --rlimit_as
+    // nor maxrss, which means neither RSS-based MLE rule can see them.
+    // --rlimit_fsize caps one memfd at 10 MB and --rlimit_nofile allows
+    // 256 of them, so ~2.5 GB of resident RAM on a 512 MB host, with no
+    // MLE and no verdict -- just an OOM kill of the container.
+    // /dev/shm is bounded by Docker's 64 MB default; memfd is not.
+    //
+    // Absent, it falls through to DEFAULT ERRNO(38). ENOSYS is exactly
+    // what a pre-3.17 kernel returns, so every caller that has a
+    // fallback takes it. Do not re-add it without a runtime that needs
+    // it (AGENTS.md: never widen the allowlist to make something work).
 
     // ---- Extended attributes ----
     getxattr,

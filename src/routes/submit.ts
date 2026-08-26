@@ -70,6 +70,16 @@ function validateSubmit(body: unknown): { ok: true; value: SubmitRequest } | { o
   if (b.input.length !== b.output.length) {
     return { ok: false, error: "'input' and 'output' arrays must be the same length" };
   }
+  // A submission with nothing to run is a malformed REQUEST, not a
+  // gradeable submission. Accepting it returned `{summary:{0,0,0},
+  // results:[]}` — the compile-error shape minus `compileError` — and
+  // `wmoj-app`'s `isPassed` requires `total > 0`, so every solution to a
+  // problem saved with no test data, including correct ones, was
+  // recorded as a non-passing submission with nothing anywhere to
+  // explain why. `judge.sh` already guards `n >= 1`; the judge did not.
+  if (b.input.length === 0) {
+    return { ok: false, error: "'input' must contain at least one test case" };
+  }
   if (b.timeLimit !== undefined && (typeof b.timeLimit !== "number" || !Number.isFinite(b.timeLimit) || b.timeLimit <= 0)) {
     return { ok: false, error: "'timeLimit' must be a positive number (ms)" };
   }
@@ -107,21 +117,49 @@ function validateSubmit(body: unknown): { ok: true; value: SubmitRequest } | { o
   };
 }
 
+// Process-lifetime flags so legacy-code warnings fire at most once per
+// language per judge instance rather than on every request.
+let warnedLegacyPython = false;
+let warnedLegacyCpp = false;
+
 /**
- * Map a legacy language code to its current equivalent. Deprecation
- * warnings are emitted once per process by `executorFor` in
- * `src/executors/index.ts` -- the single entry point for language
- * dispatch -- so this function stays silent to avoid double-logging.
+ * Map a legacy language code to its current equivalent, warning once per
+ * process per alias.
  *
  * Legacy cutover mapping:
  *   "python" -> "python3"
  *   "cpp"    -> "cpp17"
+ *
+ * The warning lives HERE, not in `executorFor`, because this is the only
+ * function that ever sees the raw request value. `executorFor` used to
+ * own it and its legacy branches were unreachable: this call runs first
+ * and hands it the already-normalised code, so the deprecation warning
+ * had never once been emitted — while this file, `executors/index.ts`
+ * and the `add-language` skill all documented it as firing. Nothing told
+ * anyone whether the wmoj-app cutover was finished, and `AGENTS.md`
+ * lists removing the aliases as a decision that needs that answer.
  */
 function normalizeLanguage(
   lang: Language | "python" | "cpp",
 ): Language {
-  if (lang === "python") return "python3";
-  if (lang === "cpp") return "cpp17";
+  if (lang === "python") {
+    if (!warnedLegacyPython) {
+      warnedLegacyPython = true;
+      logger.warn(
+        'deprecation: language code "python" is legacy; map to "python3"',
+      );
+    }
+    return "python3";
+  }
+  if (lang === "cpp") {
+    if (!warnedLegacyCpp) {
+      warnedLegacyCpp = true;
+      logger.warn(
+        'deprecation: language code "cpp" is legacy; map to "cpp17"',
+      );
+    }
+    return "cpp17";
+  }
   return lang;
 }
 
@@ -141,11 +179,23 @@ function compileArgvFor(language: Language): readonly string[] {
 }
 
 /**
- * Per-language default memoryLimitMb (e.g. pypy3 → 384) from
- * languages.json. Returns undefined when the entry doesn't set one;
- * callers then fall back to the global 256 MB default. PyPy baseline
- * RSS is ~60 MB vs CPython's ~14 MB, so PyPy submissions need more
- * headroom under a 256 MB cap — see the pypy-investigator writeup.
+ * Per-language FLOOR on memoryLimitMb (e.g. pypy3 → 384) from
+ * languages.json. Returns undefined when the entry doesn't set one.
+ *
+ * PyPy baseline RSS is ~60 MB vs CPython's ~14 MB, so a PyPy submission
+ * under a 256 MB cap spends a quarter of its budget before running a
+ * line of user code — which is why this knob exists.
+ *
+ * It is a floor rather than a default because a default never applied:
+ * `wmoj-app` sends `problem.memory_limit || 256`, which is ALWAYS a
+ * number even when the column is null or 0, and `judge.sh` takes
+ * `memLimitMb` as a required positional argument. So `payload.memoryLimit
+ * ?? languageMemoryDefaultMb(...)` short-circuited on its first term for
+ * every request either client has ever made, and every PyPy submission
+ * ran at the problem's cap. A PyPy solution that fits comfortably in
+ * 256 MB of *user* data would hit `--rlimit_as 256`, raise `MemoryError`,
+ * match `ALLOCATION_FAILURE_RE`, and be graded `MLE` while the
+ * equivalent CPython submission passed.
  */
 function languageMemoryDefaultMb(language: Language): number | undefined {
   const spec = languagesJson[language] as { memoryLimitMb?: number };
@@ -159,9 +209,22 @@ function languageMemoryDefaultMb(language: Language): number | undefined {
  * killer would fire first and produce a confusing crash. Enforcing
  * `min(requested, HOST_MEMORY_CEILING_MB)` means the judge's own
  * accounting stays authoritative and the failure is a clean MLE.
+ *
+ * The result is floored to a whole MB because that is what the sandbox
+ * enforces (`Math.max(1, Math.floor(memLimitMb))` in `nsjail.ts`).
+ * Without the floor a `memoryLimit` of 300.75 was advertised back as
+ * `effectiveMemoryLimitMb: 300.75` — a field both `types.ts` and
+ * `AGENTS.md` define as "the cap actually enforced" — while 300 MB was
+ * applied, and MLE rule 2 computed its RSS threshold against a cap that
+ * had never existed. `memoryLimit` is deliberately still accepted as any
+ * positive finite number: rounding it makes the two agree, and rejecting
+ * it would be a contract change for a shape no client sends.
  */
 export function effectiveMemLimitMb(requestedMb: number): number {
-  return Math.max(1, Math.min(requestedMb, config.HOST_MEMORY_CEILING_MB));
+  return Math.max(
+    1,
+    Math.floor(Math.min(requestedMb, config.HOST_MEMORY_CEILING_MB)),
+  );
 }
 
 /**
@@ -196,6 +259,18 @@ const ALLOCATION_FAILURE_RE =
  * close to the ceiling it got, and must never be downgraded from AC.
  * A plain SIGSEGV from a null-pointer bug has low RSS and no allocation
  * signature on stderr, so it stays RE.
+ *
+ * NOTE ON MATURITY: rules 1 and 2 read `sb.memKb`, which was `0` on
+ * every single run for the entire life of the nsjail 3.3 pin — the old
+ * code scraped it out of nsjail's log and nsjail 3.3 emits no such line.
+ * 3,457 stored test cases carry `memKb: 0`, and no submission has ever
+ * been graded `MLE` by either rule. They now measure real `ru_maxrss`
+ * from the jail runner and will fire for the first time, so treat them
+ * as unproven rather than battle-tested. Two consequences worth knowing:
+ * `memKb` is the peak of the whole jail tree (nsjail's own few MB
+ * included), so it can only ever over-report; and rule 2 duplicates
+ * `classifyKill`'s own RSS step, which is why an over-cap run usually
+ * arrives already carrying `killedBy === "OOM"`.
  */
 export function isMemoryLimitExceeded(
   sb: SandboxResult,
@@ -263,12 +338,50 @@ function buildResult(
     cpuMs: sb.cpuMs,
     memKb: sb.memKb,
   };
-  // Omit the key entirely when the checker said nothing (or never ran),
-  // so no-checker responses stay byte-identical to today's.
+  // Both optional keys are omitted rather than set false/empty, so a
+  // response for an ordinary submission stays byte-identical to what it
+  // was before either field existed.
+  //
+  // `truncated` says the strings above are a PREFIX: the sandbox now
+  // drains-and-discards past 1 MiB of stdout / 64 KiB of stderr instead
+  // of accumulating an unbounded `for(;;) puts("x")` in the Node heap of
+  // a 512 MB container. Without this flag `received` would silently
+  // disagree with what the program actually printed and a `WA` would be
+  // unexplainable to the student. The cap sits above the largest
+  // expected output `requestCaps` accepts, so a truncated run could not
+  // have been AC anyway — the verdict itself is unaffected.
+  if (sb.truncated) {
+    result.truncated = true;
+  }
+  // Omitted when the checker said nothing (or never ran).
   if (checkerMessage !== undefined && checkerMessage.length > 0) {
     result.checkerMessage = checkerMessage;
   }
   return result;
+}
+
+/**
+ * The settled outcome of grading one test case.
+ *
+ * Per-case tasks resolve one of these instead of rejecting. `Promise.all`
+ * rejects on the FIRST rejection, so a single throwing case used to
+ * return 500 while p-limit — which has no cancellation; its runner is
+ * `try { await result } catch {}` then `next()` — kept dequeuing up to
+ * 199 more. Those ran with `--cwd` pointing at a directory the route's
+ * `finally` had already removed, under a UID already handed to another
+ * submission, each arming a `timeLimitMs + 5000` timer, all of it
+ * outside the global semaphore the closure had released — and with
+ * `exitRequest()` already fired, so a concurrent SIGTERM saw
+ * `inFlight === 0`. Settling every case before teardown is what closes
+ * that window.
+ */
+type CaseOutcome =
+  | { ok: true; result: TestResult }
+  | { ok: false; error: Error };
+
+/** Narrow an unknown thrown value to an Error without a custom class. */
+function asError(err: unknown): Error {
+  return err instanceof Error ? err : new Error(String(err));
 }
 
 export const submitRouter: Router = Router();
@@ -283,7 +396,12 @@ export const submitRouter: Router = Router();
  *     (checker compile fail → HTTP 200 with checkerError)
  *  8. per-submission worker pool runs each test
  *  9. each test: nsjail → checker OR compare → verdict
- * 10. sort by index, summarize, cleanup, return 200.
+ * 10. every case settles (none may still be running), then sort by
+ *     index, summarize, cleanup, return 200.
+ *
+ * A judge-side sandbox failure at step 9 aborts the whole submission
+ * with `500 {error}` rather than being graded — see the `sandboxError`
+ * handling inside the per-case task.
  */
 submitRouter.post("/", async (req: Request, res: Response) => {
   // Refuse new work during drain. Must run BEFORE any resource acquisition
@@ -305,12 +423,16 @@ submitRouter.post("/", async (req: Request, res: Response) => {
   const compareMode: CompareMode = payload.compareMode ?? "trim-trailing";
   const checkerSource = payload.checker;
   const timeLimitMs = payload.timeLimit ?? 5000;
-  // Requested memory cap precedence: request override → per-language
-  // default (e.g. pypy3 → 384 MB) → global default 256 MB. What is
-  // actually applied to the sandbox is that value clamped to the host
-  // ceiling; it is reported back as `effectiveMemoryLimitMb`.
+  // Requested memory cap: the LARGER of what the request asked for and
+  // the language's floor (e.g. pypy3 → 384 MB), falling back to 256 MB
+  // when neither is set. `max` rather than `??` because both real
+  // clients always send a number, which made the language floor dead —
+  // see `languageMemoryDefaultMb`. What is actually applied to the
+  // sandbox is that value clamped to the host ceiling; it is reported
+  // back as `effectiveMemoryLimitMb`.
   const requestedMemLimitMb =
-    payload.memoryLimit ?? languageMemoryDefaultMb(language) ?? 256;
+    Math.max(payload.memoryLimit ?? 0, languageMemoryDefaultMb(language) ?? 0) ||
+    256;
   const memLimitMb = effectiveMemLimitMb(requestedMemLimitMb);
 
   logger.info(
@@ -412,80 +534,155 @@ submitRouter.post("/", async (req: Request, res: Response) => {
       // Per-submission pool: bound test-case parallelism within this submission.
       const pool = createPool(config.PER_SUBMISSION_CONCURRENCY);
 
+      // First judge fault seen by any case. Set once, read by every case
+      // still queued behind it so they return immediately instead of
+      // spawning against a workdir that is about to be deleted.
+      let abortReason: Error | null = null;
+
       const resultPromises = payload.input.map((rawInput, i) =>
-        pool.run(async (): Promise<TestResult> => {
-          const stdin = rawInput.endsWith("\n") ? rawInput : rawInput + "\n";
-          const expected = payload.output[i] ?? "";
-          const sandboxRes = await runSandboxed({
-            argv: runCmd.argv,
-            cwd: workDir as string,
-            uid: uid as number,
-            gid: uid as number,
-            timeLimitMs,
-            memLimitMb,
-            stdin,
-          });
-
-          // A case can only pass if the program itself finished cleanly.
-          // Unchanged from before checkers existed — and it means a
-          // crashed/TLE'd run never invokes the checker at all.
-          const ranCleanly =
-            sandboxRes.exitCode === 0 && sandboxRes.killedBy === null;
-
-          let passed = false;
-          let checkerFailed = false;
-          let checkerMessage: string | undefined;
-
-          if (ranCleanly) {
-            if (checkerSource !== undefined) {
-              // Checker REPLACES compareMode — the string comparison is
-              // not run at all when a checker is supplied.
-              const verdictFromChecker = await runChecker({
-                workDir: workDir as string,
-                uid: uid as number,
-                index: i,
-                input: stdin,
-                expected,
-                received: sandboxRes.stdout,
-              });
-              passed = verdictFromChecker.outcome === "accepted";
-              checkerFailed = verdictFromChecker.outcome === "internal-error";
-              checkerMessage = verdictFromChecker.message;
-              if (checkerFailed) {
-                logger.error(
-                  {
-                    index: i,
-                    exitCode: verdictFromChecker.exitCode,
-                    message: checkerMessage,
-                  },
-                  "submit: checker reported an internal error",
-                );
-              }
-            } else {
-              passed = compare(compareMode, expected, sandboxRes.stdout);
-            }
+        pool.run(async (): Promise<CaseOutcome> => {
+          if (abortReason !== null) {
+            return { ok: false, error: abortReason };
           }
+          try {
+            // An EMPTY input stays empty. `"".endsWith("\n")` is false,
+            // so the old form silently rewrote "no input at all" into a
+            // single blank line — a real difference to `sys.stdin.read()`
+            // and to `scanf`, and the mutated string is also what
+            // `runChecker` writes to the checker's input file.
+            const stdin =
+              rawInput.length === 0 || rawInput.endsWith("\n")
+                ? rawInput
+                : rawInput + "\n";
+            const expected = payload.output[i] ?? "";
+            const sandboxRes = await runSandboxed({
+              argv: runCmd.argv,
+              cwd: workDir as string,
+              uid: uid as number,
+              gid: uid as number,
+              timeLimitMs,
+              memLimitMb,
+              stdin,
+            });
 
-          const verdict = deriveVerdict(
-            sandboxRes,
-            passed,
-            memLimitMb,
-            checkerFailed,
-          );
-          return buildResult(
-            i,
-            expected,
-            sandboxRes,
-            passed,
-            verdict,
-            checkerMessage,
-          );
+            // A JUDGE fault: nsjail or the runner could not be spawned,
+            // nsjail bailed before executing anything (an unreadable or
+            // uncompilable `--seccomp_policy`, a missing `--cwd`), or no
+            // resource report survived. NOTHING of the user's code ran,
+            // so there is nothing to grade — throwing hands it to the
+            // route's `catch`, which returns the documented
+            // `500 {error}` "the judge is wrong" channel.
+            //
+            // This is the case that reproduced live: with an
+            // uncompilable seccomp policy nsjail exits 255 with its
+            // diagnostic on fd 3, so the child's stdout and stderr are
+            // both empty, `exitCode !== 0` held, and the judge graded
+            // EVERY case of EVERY submission `RE` on a clean HTTP 200
+            // while `/health` still reported `ok`. Deliberately not
+            // `IE`: `IE` is documented as checker-only.
+            if (sandboxRes.sandboxError !== undefined) {
+              throw new Error(
+                `sandbox failure on test case ${i}: ${sandboxRes.sandboxError}`,
+              );
+            }
+
+            // A case can only pass if the program itself finished cleanly.
+            // Unchanged from before checkers existed — and it means a
+            // crashed/TLE'd run never invokes the checker at all.
+            const ranCleanly =
+              sandboxRes.exitCode === 0 && sandboxRes.killedBy === null;
+
+            let passed = false;
+            let checkerFailed = false;
+            let checkerMessage: string | undefined;
+
+            if (ranCleanly) {
+              if (checkerSource !== undefined) {
+                // Checker REPLACES compareMode — the string comparison is
+                // not run at all when a checker is supplied.
+                const verdictFromChecker = await runChecker({
+                  workDir: workDir as string,
+                  uid: uid as number,
+                  index: i,
+                  input: stdin,
+                  expected,
+                  received: sandboxRes.stdout,
+                });
+                // Same rule as above, one layer down: the checker's own
+                // sandbox failing is the judge breaking, not the problem
+                // being misconfigured, so it must not become `IE` either.
+                if (verdictFromChecker.sandboxError !== undefined) {
+                  throw new Error(
+                    `checker sandbox failure on test case ${i}: ${verdictFromChecker.sandboxError}`,
+                  );
+                }
+                passed = verdictFromChecker.outcome === "accepted";
+                checkerFailed = verdictFromChecker.outcome === "internal-error";
+                checkerMessage = verdictFromChecker.message;
+                if (checkerFailed) {
+                  logger.error(
+                    {
+                      index: i,
+                      exitCode: verdictFromChecker.exitCode,
+                      message: checkerMessage,
+                    },
+                    "submit: checker reported an internal error",
+                  );
+                }
+              } else {
+                passed = compare(compareMode, expected, sandboxRes.stdout);
+              }
+            }
+
+            const verdict = deriveVerdict(
+              sandboxRes,
+              passed,
+              memLimitMb,
+              checkerFailed,
+            );
+            return {
+              ok: true,
+              result: buildResult(
+                i,
+                expected,
+                sandboxRes,
+                passed,
+                verdict,
+                checkerMessage,
+              ),
+            };
+          } catch (err) {
+            // Everything reaching here is the harness failing, never a
+            // verdict: a judge-fault throw from above, or an unexpected
+            // rejection (EMFILE, ENOSPC). It is deliberately NOT
+            // synthesised into a verdict — `RE` would blame the student
+            // for the judge, and `IE` is checker-only — so it aborts the
+            // submission instead. Resolving rather than rejecting is
+            // what guarantees every sibling task has settled before the
+            // route's `finally` removes the workdir and releases the UID.
+            const error = asError(err);
+            if (abortReason === null) abortReason = error;
+            return { ok: false, error };
+          }
         }),
       );
 
-      const results = (await Promise.all(resultPromises)).sort(
-        (a, b) => a.index - b.index,
-      );
+      const settled = await Promise.allSettled(resultPromises);
+      const results: TestResult[] = [];
+      let caseFailure: Error | null = null;
+      for (const outcome of settled) {
+        if (outcome.status === "rejected") {
+          // Unreachable while the task above catches everything; kept so
+          // the settle-before-teardown guarantee does not depend on that.
+          caseFailure ??= asError(outcome.reason);
+        } else if (outcome.value.ok) {
+          results.push(outcome.value.result);
+        } else {
+          caseFailure ??= outcome.value.error;
+        }
+      }
+      if (caseFailure !== null) throw caseFailure;
+      results.sort((a, b) => a.index - b.index);
 
       const summary = {
         total: results.length,
@@ -502,9 +699,13 @@ submitRouter.post("/", async (req: Request, res: Response) => {
     } catch (err) {
       logger.error({ err }, "submit: unexpected failure");
       if (!res.headersSent) {
-        res.status(500).json({ error: (err as Error).message });
+        res.status(500).json({ error: asError(err).message });
       }
     } finally {
+      // Safe to tear down unconditionally: the only thing that can still
+      // be in flight at this point is nothing. Every per-case task
+      // resolves rather than rejects, and the route awaits all of them
+      // before it can reach here by any path.
       if (workDir) await cleanupWorkdir(workDir);
       if (uid !== null) releaseUid(uid);
     }

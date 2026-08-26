@@ -56,8 +56,35 @@ export interface TestResult {
   timedOut: boolean;
   verdict: Verdict;
   timeMs: number;
+  /**
+   * CPU time (user + system) actually consumed by the jailed process
+   * tree, in milliseconds. Measured by `wait4()`/`getrusage` in the
+   * out-of-jail runner — see `SandboxResult.cpuMs`. Between the
+   * introduction of the nsjail 3.3 pin and that runner this was `0` on
+   * every single run, which silently disabled the authoritative TLE
+   * gate; treat a whole response of `cpuMs: 0` as a judge fault, not as
+   * a set of very fast submissions.
+   */
   cpuMs: number;
+  /**
+   * Peak RSS of the jailed process tree, in KB. Same provenance and the
+   * same "0 everywhere means the judge is broken" caveat as `cpuMs`.
+   */
   memKb: number;
+  /**
+   * Set when the program wrote more than the sandbox will retain, so
+   * `stdout`/`stderr`/`received` above are a prefix rather than the
+   * whole stream. Present only when something was actually dropped, so
+   * responses for ordinary submissions stay byte-identical to before
+   * the cap existed.
+   *
+   * A truncated run can still be graded: the cap sits above the largest
+   * expected output `requestCaps` will accept, so a program that trips
+   * it cannot have been `AC` anyway. It exists because an unbounded
+   * `for(;;) puts("x")` used to accumulate hundreds of MB in the Node
+   * heap of a 512 MB container and take the whole service down.
+   */
+  truncated?: boolean;
   /**
    * Trimmed, ~1 KB-truncated stderr of the custom checker for this
    * case. Present only when a `checker` was supplied AND the checker
@@ -112,17 +139,79 @@ export interface SandboxOpts {
   rlimitAsMb?: number;
   stdin: string;
   chrootDir?: string;
+  /**
+   * Cap, in bytes, on how much of the child's stdout the sandbox
+   * retains. Defaults to `DEFAULT_MAX_STDOUT_BYTES` (1 MiB) in
+   * `nsjail.ts`, which sits just above the 1,000,000-byte per-case
+   * expected-output cap `requestCaps` enforces — so for `/submit` the
+   * default can never truncate output that could have been `AC`.
+   *
+   * `/generate-tests` is the one caller whose stdout IS the payload
+   * (a JSON array of every test input) and can legitimately exceed
+   * 1 MiB; it must raise this deliberately rather than inherit the
+   * `/submit` default.
+   */
+  maxStdoutBytes?: number;
+  /**
+   * Cap, in bytes, on retained child stderr. Defaults to
+   * `DEFAULT_MAX_STDERR_BYTES` (64 KiB). `/generate-tests` carries its
+   * expected outputs on stderr and has the same reason as above to
+   * raise it.
+   */
+  maxStderrBytes?: number;
 }
 
 export interface SandboxResult {
+  /**
+   * The jailed program's exit code as nsjail reports it: its own status
+   * for a normal exit, or `128 + WTERMSIG` when a signal killed it.
+   * `null` only when nothing ran (spawn failure) or the runner itself
+   * was signalled — both of which also set `sandboxError`.
+   */
   exitCode: number | null;
   timedOut: boolean;
+  /** Peak RSS of the jailed process tree in KB. See `cpuMs`. */
   memKb: number;
+  /**
+   * Wall time of the jail, in ms: the runner's own measurement across
+   * `fork()`→`wait4()` of nsjail, so it excludes Node's spawn latency
+   * and V8 pauses. Falls back to parent-measured wall time only when
+   * the run was force-killed and no report survived.
+   */
   timeMs: number;
+  /**
+   * CPU time (user + system) of the jailed process tree in ms, from
+   * `wait4()`'s `rusage`. This is the quantity `classifyKill` treats as
+   * the authoritative TLE gate; it is real, kernel-accounted work, not
+   * a number scraped out of nsjail's log.
+   */
   cpuMs: number;
   stdout: string;
   stderr: string;
   killedBy: "TO" | "OOM" | "SIG" | null;
+  /**
+   * True when stdout or stderr exceeded its cap and the retained string
+   * is a prefix. See `TestResult.truncated`.
+   */
+  truncated: boolean;
+  /**
+   * Set ONLY when the judge's own sandbox machinery failed, never for
+   * anything the user's program did: nsjail or the runner could not be
+   * spawned, nsjail bailed before executing anything (an unreadable or
+   * uncompilable `--seccomp_policy`, a missing `--cwd`), or the run
+   * produced no resource report at all.
+   *
+   * Callers must treat this as "the judge is wrong" — throw, so the
+   * route's `catch` returns `500 {error}` — and must NOT grade it. The
+   * failure it exists to stop is a container where `policy.kafel` will
+   * not compile: nsjail exits 255 with its diagnostic on fd 3, so the
+   * child's stdout and stderr are both empty, and every test case of
+   * every submission comes back `RE` on a clean HTTP 200 while
+   * `/health` still says `{"status":"ok"}`.
+   *
+   * Deliberately not `IE`: `IE` is documented as checker-only.
+   */
+  sandboxError?: string;
 }
 
 export interface UidPool {

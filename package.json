@@ -2,7 +2,11 @@
   "name": "judge",
   "version": "0.2.0",
   "private": true,
+  "license": "MIT",
   "type": "commonjs",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
