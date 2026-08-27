@@ -437,7 +437,18 @@ export async function runSandboxed(
     "--rlimit_nofile", "256",
     "--rlimit_fsize", "10",
     "--rlimit_core", "0",
-    "--seccomp_policy", config.SECCOMP_POLICY,
+    // The ONLY thing UNSAFE_DISABLE_SECCOMP changes: the filter is not
+    // installed, so nothing above is affected and the run is measured,
+    // rlimited and killed exactly as it would be otherwise. It exists
+    // because QEMU cannot install this amd64 BPF program on an arm64
+    // kernel (EINVAL from prctl), which makes the judge unbootable on
+    // Apple Silicon; `config.ts` refuses the variable outright when
+    // NODE_ENV=production, so this branch is dead code in production.
+    // Do not reach for it to make a submission work: an unfiltered
+    // child has the network and every syscall the kernel offers.
+    ...(config.UNSAFE_DISABLE_SECCOMP
+      ? []
+      : ["--seccomp_policy", config.SECCOMP_POLICY]),
     "--env", "PATH",
     "--env", "LANG",
     "--env", "LC_ALL",

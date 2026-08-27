@@ -26,9 +26,9 @@ docker run --rm -p 4001:4001 -e JUDGE_SHARED_SECRET=… -e AUTH_STRICT=true wmoj
 ```
 
 **No lint, no test, no format script; no CI, zero test files.** Never claim otherwise. `tsc` runs
-with `strict` + `noUncheckedIndexedAccess`, so a clean build is a real bar — but behavioural changes
-must be checked by hand against a running container **on amd64 hardware** (seccomp cannot be
-installed under x86-on-arm emulation, so a Mac can build the image but not exercise the sandbox).
+with `strict` + `noUncheckedIndexedAccess`, so a clean build is a real bar — behavioural changes must
+be checked by hand against a running container. On arm64 that needs `UNSAFE_DISABLE_SECCOMP=true`
+plus `NODE_ENV=development`, and emulation leaves `RLIMIT_AS` unenforced → **`run-judge-locally`**.
 
 - **Won't run natively on macOS** — nsjail is Linux-only. Use Docker.
 - **`.env.local` is intentionally not loaded** (no `dotenv`, no `--env-file`); local runs fall back
@@ -36,8 +36,8 @@ installed under x86-on-arm emulation, so a Mac can build the image but not exerc
 - The judge **refuses to boot** unless `python3`, `pypy3` and `g++` resolve, nsjail launches with
   `policy.kafel`, **and** a probe run reports non-zero `cpuMs`. A judge that cannot measure must not
   accept submissions. `NODE_ENV=production` is baked in, so a missing `JUDGE_SHARED_SECRET` exits 1.
-- **Build `--platform=linux/amd64`.** `policy.kafel` targets the amd64 syscall table; on arm64 it
-  fails to compile, nsjail exits 255, and every submission is graded `RE` with a green `/health`.
+- **Build `--platform=linux/amd64`.** `policy.kafel` targets the amd64 syscall table; built for
+  arm64 it will not compile and nsjail exits 255, so the boot probe above refuses to start.
 
 ## Skills
 
@@ -46,7 +46,8 @@ skill *before* touching the area; each holds failure modes this file has no room
 `sandbox-changes` (`src/sandbox/**`, `policy.kafel`, `Dockerfile`) · `custom-checkers`
 (`src/checker/`, the `checker` field) · `add-language` (a language or a compiler flag) ·
 `verdicts-and-comparison` (`deriveVerdict`, the MLE rules, `src/compare/`) · `judge-app-contract`
-(any request/response field, env-var name, or verdict string).
+(any request/response field, env-var name, or verdict string) · `run-judge-locally` (building,
+booting or smoke-testing the container, and pairing it with a local `wmoj-app`).
 
 ## API
 
@@ -79,9 +80,9 @@ admin test data the judge would refuse. Limits 60 s / 1024 MB, bypassing the hos
 admin-only but **not enforced**, and it **bypasses the global semaphore**.
 
 **`GET /health`** — unauthenticated by design (Render probes). Four checks — the three toolchains
-**and the sandbox itself** — single-flighted and cached 30 s: `200 {status:"ok", version}`, or `503
-{status:"degraded", reason, version}`, or 503 `"draining"` during shutdown. `version` is the
-deployment marker: `RENDER_GIT_COMMIT` if set, else package version + start time.
+**and the sandbox itself** — single-flighted, cached 30 s: `200 {status,version,seccomp}`, `503
+{status:"degraded",reason,version,seccomp}`, or 503 `"draining"` while shutting down. `version` is
+`RENDER_GIT_COMMIT` if set, else package version + start time; `seccomp` is `enforced`/`disabled`.
 
 ## Size caps and the memory clamp
 
@@ -101,9 +102,10 @@ fires before `RLIMIT_AS` and every in-flight submission dies instead of one gett
 ## Sandbox
 
 **Deliberately weaker than a textbook sandbox**, stripped down to run unprivileged. Active: seccomp
-BPF (`policy.kafel`), rlimits, a per-submission `0700` tmpdir, a 4-var env allowlist (`PATH`, `LANG`,
-`LC_ALL`, `PYTHONUNBUFFERED`). Disabled: **all seven namespaces** (user, net, mnt, pid, ipc, uts,
-cgroup), chroot, `--user`/`--group`, cgroups.
+BPF (`policy.kafel`, dropped only by the dev-only `UNSAFE_DISABLE_SECCOMP`, which `config.ts` refuses
+under `NODE_ENV=production`), rlimits, a per-submission `0700` tmpdir, a 4-var env allowlist (`PATH`,
+`LANG`, `LC_ALL`, `PYTHONUNBUFFERED`). Disabled: **all seven namespaces** (user, net, mnt, pid, ipc,
+uts, cgroup), chroot, `--user`/`--group`, cgroups.
 
 - Every submission runs as **UID 1000 — the same UID as the Node process** — sharing its PID, mount,
   and network namespaces. The UID pool is now just a concurrency gate.

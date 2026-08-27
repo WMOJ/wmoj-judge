@@ -86,6 +86,25 @@ async function main(): Promise<void> {
   app.use("/submit", ...gated, submitRouter);
   app.use("/generate-tests", ...gated, generateTestsRouter);
 
+  // Loud, unmissable, and emitted BEFORE the probes so it is still the
+  // first thing in the log even when boot then fails for another
+  // reason. `config.ts` has already refused this combination outright
+  // if NODE_ENV=production, so reaching here means a developer opted in
+  // on a developer box — but "I forgot I left it on" is exactly how an
+  // unfiltered judge ends up exposed, and one warn buried mid-boot is
+  // not enough. /health carries the same fact for anyone who arrives
+  // after the log has scrolled.
+  if (config.UNSAFE_DISABLE_SECCOMP) {
+    logger.warn(
+      { seccomp: "disabled", nodeEnv: config.NODE_ENV },
+      "!!!!! SECCOMP FILTER DISABLED (UNSAFE_DISABLE_SECCOMP=true) !!!!! " +
+        "submissions run with NO syscall filter: they can reach the network and " +
+        "any other process sharing UID 1000. rlimits, no-new-privs and the " +
+        "unprivileged UID still apply, nothing else does. Local development " +
+        "against trusted code ONLY - never expose this instance",
+    );
+  }
+
   await startupSweep();
   await probeToolchainAtBoot();
 
@@ -129,6 +148,9 @@ async function main(): Promise<void> {
       {
         port: config.PORT,
         authStrict: config.AUTH_STRICT,
+        // Same rationale as authStrict: the other switch that weakens a
+        // security boundary and leaves the service looking healthy.
+        seccomp: config.UNSAFE_DISABLE_SECCOMP ? "disabled" : "enforced",
         nodeEnv: config.NODE_ENV,
         version: config.VERSION,
       },

@@ -247,6 +247,51 @@ const DEFAULT_GLOBAL_SUBMIT_CONCURRENCY = Math.max(
   ),
 );
 
+/**
+ * LOCAL-DEVELOPMENT ESCAPE HATCH: run the sandbox with **no seccomp
+ * filter at all**. Off by default, and refused outright in production.
+ *
+ * Why it exists. `policy.kafel` is written against the amd64 syscall
+ * table, so the image is pinned `--platform=linux/amd64`. On an arm64
+ * host (an Apple Silicon laptop) that image runs under QEMU user-mode
+ * emulation, and the emulator cannot install an amd64 BPF program on an
+ * arm64 kernel: `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER)` returns
+ * EINVAL, nsjail exits 255 before executing anything, and
+ * `sandboxSelfCheck()` correctly refuses to boot. That refusal is right
+ * — it replaced a judge that booted green and graded every submission
+ * `RE` — but it also means the service cannot be run at all on the
+ * hardware most of its contributors own. Neither
+ * `--security-opt seccomp=unconfined` nor `--privileged` changes this;
+ * it is the architecture mismatch, not Docker's own profile.
+ *
+ * What it costs, precisely. Syscalls are NOT filtered: the child may
+ * open sockets and reach the network, call `ptrace`/`process_vm_readv`
+ * against other processes sharing UID 1000, and use every syscall the
+ * kernel offers. Everything else the sandbox does still applies —
+ * rlimits (`RLIMIT_AS`/`CPU`/`NPROC`/`NOFILE`/`FSIZE`/`CORE`),
+ * `--mode o` with all seven namespaces disabled, no-new-privs, the
+ * inherited unprivileged UID 1000 with no capabilities, the 4-var env
+ * allowlist, the per-submission workdir, and the process-group kill. So
+ * TLE/MLE still work and the judge still measures; containment against
+ * hostile code does not. Use it against code you wrote, never against
+ * anything other people can submit to.
+ *
+ * The production guard is a throw, not a warning, and it is deliberate
+ * that it lands here at module-import time: `NODE_ENV=production` is
+ * baked into the Dockerfile, so the shipped image refuses this variable
+ * unless the operator also overrides `NODE_ENV`, and there is no code
+ * path by which a Render deploy can end up running unfiltered.
+ */
+const UNSAFE_DISABLE_SECCOMP = boolEnv("UNSAFE_DISABLE_SECCOMP", false);
+if (UNSAFE_DISABLE_SECCOMP && IS_PROD) {
+  throw new Error(
+    "UNSAFE_DISABLE_SECCOMP is a local-development escape hatch and is refused " +
+      "when NODE_ENV=production. It runs untrusted submissions with no syscall " +
+      "filter. If you need production behaviour, run the judge on an amd64 " +
+      "Linux host, where policy.kafel installs correctly.",
+  );
+}
+
 export interface JudgeConfig {
   readonly PORT: number;
   readonly NODE_ENV: string;
@@ -263,6 +308,7 @@ export interface JudgeConfig {
   readonly RATE_LIMIT_MAX: number;
   readonly NSJAIL_BIN: string;
   readonly SECCOMP_POLICY: string;
+  readonly UNSAFE_DISABLE_SECCOMP: boolean;
   readonly LOG_LEVEL: string;
   readonly VERSION: string;
 }
@@ -366,6 +412,12 @@ export const config: JudgeConfig = Object.freeze({
   // repo's policy.kafel or every run fails to start the jail and every
   // submission is graded RE (see README, "Run from source").
   SECCOMP_POLICY: strEnv("SECCOMP_POLICY", "/app/policy.kafel"),
+  // UNSAFE_DISABLE_SECCOMP: unset everywhere that matters — default
+  // false, and the guard above makes `true` unreachable in production.
+  // Set it only on a developer machine that cannot install the amd64
+  // BPF filter (see the comment on the constant); `server.ts` logs a
+  // banner and `/health` reports `seccomp: "disabled"` while it is on.
+  UNSAFE_DISABLE_SECCOMP,
   // LOG_LEVEL: unset in both .env.local and the Render dashboard —
   // default "info" applies.
   LOG_LEVEL: logLevelEnv(),

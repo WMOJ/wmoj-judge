@@ -78,10 +78,13 @@ ignored; compilation is always `-O2 -std=gnu++17`.
 
 ## `GET /health`
 
-Unauthenticated by design, for Render's probe. `200 {status:"ok", version}` or
-`503 {status:"degraded", reason, version}`. `status` is what every caller reads; `version` is the
-deployment marker (`RENDER_GIT_COMMIT`, else package version + process start time). Adding a field
-here is safe; changing `status` is not.
+Unauthenticated by design, for Render's probe. `200 {status:"ok", version, seccomp}` or
+`503 {status:"degraded", reason, version, seccomp}`. `status` is what every caller reads; `version`
+is the deployment marker (`RENDER_GIT_COMMIT`, else package version + process start time); `seccomp`
+is `"enforced"` or `"disabled"` and is purely informational, so a judge running the local-development
+`UNSAFE_DISABLE_SECCOMP` escape hatch is distinguishable from outside. `wmoj-app`'s
+`api/status/health` deliberately forwards none of this body, only reachability. Adding a field here
+is safe; changing `status` is not.
 
 ## Auth and env
 

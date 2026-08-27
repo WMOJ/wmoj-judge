@@ -34,7 +34,7 @@ wmoj-jailrun 4 /usr/local/bin/nsjail
 | `--rlimit_nofile 256` | per process |
 | `--rlimit_fsize 10` | MB per **regular file** (`S_ISREG`). It does not bound pipe writes — the stdout/stderr caps in `runSandboxed` do that |
 | `--rlimit_core 0` | no core dumps |
-| `--seccomp_policy` | `config.SECCOMP_POLICY`, default `/app/policy.kafel`, **re-read on every spawn** |
+| `--seccomp_policy` | `config.SECCOMP_POLICY`, default `/app/policy.kafel`, **re-read on every spawn**. The ONLY conditional flag: omitted entirely when `UNSAFE_DISABLE_SECCOMP` is set, a local-development escape hatch for arm64 hosts that `config.ts` refuses under `NODE_ENV=production` → `run-judge-locally` |
 | `--env NAME` (×4) | name-only form: nsjail forwards these four from its own environment. Nothing else from the judge's env reaches the child |
 | `--time_limit` | wall-clock liveness backstop only, deliberately the loosest of the four timers |
 | `--log_fd 3` | nsjail's own diagnostics, on a dedicated pipe. Read into `nsjailLog` and **logged only** — no verdict derives from it |

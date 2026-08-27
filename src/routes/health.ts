@@ -139,10 +139,16 @@ async function probeSandbox(): Promise<string | null> {
   } catch (err) {
     return `${config.NSJAIL_BIN} not executable: ${(err as Error).message}`;
   }
-  try {
-    await fs.access(config.SECCOMP_POLICY, fsConstants.R_OK);
-  } catch (err) {
-    return `${config.SECCOMP_POLICY} not readable: ${(err as Error).message}`;
+  // Skipped, and only skipped, when no policy is going to be installed.
+  // The launch probe below still runs in full either way, so the mode
+  // changes what the probe requires rather than whether it runs — the
+  // normal path keeps demanding a policy that exists AND compiles.
+  if (!config.UNSAFE_DISABLE_SECCOMP) {
+    try {
+      await fs.access(config.SECCOMP_POLICY, fsConstants.R_OK);
+    } catch (err) {
+      return `${config.SECCOMP_POLICY} not readable: ${(err as Error).message}`;
+    }
   }
 
   let timer: NodeJS.Timeout | undefined;
@@ -294,15 +300,29 @@ export async function probeToolchainAtBoot(): Promise<void> {
 
 export const healthRouter: Router = Router();
 
+/**
+ * Whether the syscall filter is actually installed on every run.
+ *
+ * Reported on every /health response, additively — `status` and
+ * `version` are untouched, so no existing caller changes. It is here
+ * because `UNSAFE_DISABLE_SECCOMP` is otherwise invisible from outside
+ * the box: a judge running unfiltered answers `{"status":"ok"}` exactly
+ * like a correctly sandboxed one, and the boot banner has long since
+ * scrolled away. Anything that can reach /health can now tell them
+ * apart.
+ */
+const SECCOMP_STATUS = config.UNSAFE_DISABLE_SECCOMP ? "disabled" : "enforced";
+
 function respond(res: Response, health: CachedHealth): void {
   if (health.ok) {
-    res.json({ status: "ok", version: config.VERSION });
+    res.json({ status: "ok", version: config.VERSION, seccomp: SECCOMP_STATUS });
     return;
   }
   res.status(503).json({
     status: "degraded",
     reason: health.failures.join(", "),
     version: config.VERSION,
+    seccomp: SECCOMP_STATUS,
   });
 }
 
@@ -335,6 +355,7 @@ healthRouter.get("/", async (_req: Request, res: Response) => {
         status: "degraded",
         reason: "draining",
         version: config.VERSION,
+        seccomp: SECCOMP_STATUS,
       });
       return;
     }
@@ -362,6 +383,7 @@ healthRouter.get("/", async (_req: Request, res: Response) => {
         status: "degraded",
         reason: (err as Error).message,
         version: config.VERSION,
+        seccomp: SECCOMP_STATUS,
       });
     }
   }
