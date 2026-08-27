@@ -131,14 +131,7 @@ export interface SandboxOpts {
   gid: number;
   timeLimitMs: number;
   memLimitMb: number;
-  /**
-   * Optional override for the nsjail --rlimit_as VA-space cap. When set,
-   * nsjail uses this value instead of `memLimitMb` for --rlimit_as.
-   * Clamped to `>= memLimitMb` inside nsjail.ts.
-   */
-  rlimitAsMb?: number;
   stdin: string;
-  chrootDir?: string;
   /**
    * Cap, in bytes, on how much of the child's stdout the sandbox
    * retains. Defaults to `DEFAULT_MAX_STDOUT_BYTES` (1 MiB) in

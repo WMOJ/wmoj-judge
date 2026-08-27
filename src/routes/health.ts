@@ -301,29 +301,31 @@ export async function probeToolchainAtBoot(): Promise<void> {
 export const healthRouter: Router = Router();
 
 /**
- * Whether the syscall filter is actually installed on every run.
+ * The 503 body, in one place so the shape `wmoj-app` reads never drifts
+ * between the draining, probe-failure and caught-exception branches.
  *
- * Reported on every /health response, additively — `status` and
- * `version` are untouched, so no existing caller changes. It is here
- * because `UNSAFE_DISABLE_SECCOMP` is otherwise invisible from outside
- * the box: a judge running unfiltered answers `{"status":"ok"}` exactly
- * like a correctly sandboxed one, and the boot banner has long since
- * scrolled away. Anything that can reach /health can now tell them
- * apart.
+ * `seccomp` reports whether the syscall filter is actually installed on every
+ * run, additively — `status` and `version` are untouched, so no existing caller
+ * changes. It is here because `UNSAFE_DISABLE_SECCOMP` is otherwise invisible
+ * from outside the box: a judge running unfiltered answers `{"status":"ok"}`
+ * exactly like a correctly sandboxed one, and the boot banner has long since
+ * scrolled away. Anything that can reach /health can now tell them apart.
  */
-const SECCOMP_STATUS = config.UNSAFE_DISABLE_SECCOMP ? "disabled" : "enforced";
+function degraded(res: Response, reason: string): void {
+  res.status(503).json({
+    status: "degraded",
+    reason,
+    version: config.VERSION,
+    seccomp: config.SECCOMP_STATUS,
+  });
+}
 
 function respond(res: Response, health: CachedHealth): void {
   if (health.ok) {
-    res.json({ status: "ok", version: config.VERSION, seccomp: SECCOMP_STATUS });
+    res.json({ status: "ok", version: config.VERSION, seccomp: config.SECCOMP_STATUS });
     return;
   }
-  res.status(503).json({
-    status: "degraded",
-    reason: health.failures.join(", "),
-    version: config.VERSION,
-    seccomp: SECCOMP_STATUS,
-  });
+  degraded(res, health.failures.join(", "));
 }
 
 /**
@@ -351,12 +353,7 @@ function respond(res: Response, health: CachedHealth): void {
 healthRouter.get("/", async (_req: Request, res: Response) => {
   try {
     if (isDraining()) {
-      res.status(503).json({
-        status: "degraded",
-        reason: "draining",
-        version: config.VERSION,
-        seccomp: SECCOMP_STATUS,
-      });
+      degraded(res, "draining");
       return;
     }
 
@@ -379,12 +376,7 @@ healthRouter.get("/", async (_req: Request, res: Response) => {
   } catch (err) {
     logger.error({ err }, "health: probe failed");
     if (!res.headersSent) {
-      res.status(503).json({
-        status: "degraded",
-        reason: (err as Error).message,
-        version: config.VERSION,
-        seccomp: SECCOMP_STATUS,
-      });
+      degraded(res, (err as Error).message);
     }
   }
 });

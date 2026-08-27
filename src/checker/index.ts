@@ -1,10 +1,10 @@
-import { spawn } from "child_process";
 import { constants as fsConstants, promises as fs } from "fs";
 import * as path from "path";
 import { nanoid } from "nanoid";
 import type { SandboxResult } from "../types";
 import { runSandboxed } from "../sandbox/nsjail";
 import { buildChildEnv } from "../sandbox/minimalEnv";
+import { runCompile } from "../util/compile";
 
 /**
  * Custom checkers — for problems whose answer is not unique ("output any
@@ -83,77 +83,6 @@ const TRAILING_REPLACEMENT_RE = /�$/;
 const CHECKER_FATAL_EXIT_FLOOR = 128;
 
 /**
- * Cap on how much of g++'s stdout/stderr we keep, per stream.
- *
- * Nothing else bounds this text: it goes straight into the HTTP 200
- * body as `checkerError`, while the log line that merely *records* it
- * truncates at 2000 chars. Checker source is capped at 100 KB but can
- * still be engineered for diagnostic volume — deep template
- * instantiation, repeated `_Pragma("message(…)")` — so g++ exits
- * quickly and cheaply while emitting hundreds of MB of stderr, and past
- * V8's max string length `stderr += …` throws `RangeError`
- * synchronously inside a stream `'data'` handler: an uncaught
- * exception, not a rejected promise.
- */
-const MAX_DIAGNOSTIC_BYTES = 64 * 1024;
-
-/** Appended when a stream hit `MAX_DIAGNOSTIC_BYTES`. */
-const DIAGNOSTICS_TRUNCATED = "\n[diagnostics truncated by the judge]\n";
-
-/**
- * Attach a capped, decode-once collector to a compiler's stdio stream
- * and return a function that decodes everything collected.
- *
- * This is a **verbatim copy** of the collector in `executors/cpp.ts` and
- * `routes/generateTests.ts`. All three spawn g++ outside nsjail and put
- * its diagnostics into an HTTP 200/400 body; keeping the three byte-
- * identical is what stops them drifting into three different truncation
- * and decoding behaviours for the same compiler.
- *
- * Buffers are accumulated and decoded **once**, at close, matching
- * `sandbox/nsjail.ts`. Decoding per chunk (`stderr += chunk.toString()`)
- * decodes each 64 KB pipe chunk in isolation, so a multi-byte sequence
- * straddling a chunk boundary becomes U+FFFD on both sides —
- * `buildChildEnv` sets `LC_ALL=C.UTF-8` and g++ quotes every identifier
- * with U+2018/U+2019, so multi-byte sequences occur about once per
- * diagnostic line.
- *
- * `stream` is nullable because `ChildProcess.prototype.spawn` returns
- * early on UV_EMFILE/UV_ENFILE *before* assigning `stdout`/`stderr`; a
- * bare `child.stderr.on(…)` would then throw a TypeError synchronously
- * inside the `new Promise` executor, rejecting where every caller here
- * expects a discriminated `{ok:false}` — surfacing as a 500 instead of
- * the HTTP 200 + `checkerError` the contract requires. The `'error'`
- * event still fires and resolves the result object.
- */
-function collectCapped(stream: NodeJS.ReadableStream | null): () => string {
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  let truncated = false;
-
-  stream?.on("data", (chunk: Buffer) => {
-    const room = MAX_DIAGNOSTIC_BYTES - bytes;
-    if (room <= 0) {
-      truncated = true;
-      return;
-    }
-    if (chunk.length > room) {
-      chunks.push(chunk.subarray(0, room));
-      bytes = MAX_DIAGNOSTIC_BYTES;
-      truncated = true;
-      return;
-    }
-    chunks.push(chunk);
-    bytes += chunk.length;
-  });
-
-  return () => {
-    const text = Buffer.concat(chunks).toString("utf8");
-    return truncated ? `${text}${DIAGNOSTICS_TRUNCATED}` : text;
-  };
-}
-
-/**
  * Outcome of running the checker on one test case.
  *
  *   accepted       exit 0                        -> the case passes
@@ -223,30 +152,12 @@ export async function compileChecker(
     };
   }
 
-  return new Promise((resolve) => {
-    const env = buildChildEnv("cpp17");
-    const child = spawn(
-      "/usr/bin/g++",
-      ["-O2", "-std=gnu++17", srcPath, "-o", outPath],
-      { cwd: workDir, env, stdio: ["ignore", "pipe", "pipe"] },
-    );
-
-    const readStdout = collectCapped(child.stdout);
-    const readStderr = collectCapped(child.stderr);
-
-    child.on("error", (err) => {
-      resolve({ ok: false, stderr: `spawn error: ${err.message}\n${readStderr()}` });
-    });
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve({ ok: true, binaryPath: outPath });
-        return;
-      }
-      const stdout = readStdout();
-      const combined = readStderr() + (stdout ? `\n${stdout}` : "");
-      resolve({ ok: false, stderr: combined || `g++ exited ${code}` });
-    });
-  });
+  const result = await runCompile(
+    ["/usr/bin/g++", "-O2", "-std=gnu++17", srcPath, "-o", outPath],
+    workDir,
+    buildChildEnv("cpp17"),
+  );
+  return result.ok ? { ok: true, binaryPath: outPath } : result;
 }
 
 /**

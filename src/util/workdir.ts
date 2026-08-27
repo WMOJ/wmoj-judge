@@ -33,6 +33,20 @@ const activeWorkdirs = new Set<string>();
  * itself runs as UID 1000 -- the same UID the child gets -- so it can
  * still access the directory for setup and teardown without a chown.
  */
+/**
+ * True when Node is running as root (effective UID 0). Captured once at module
+ * load.
+ *
+ * On Render, Node runs as UID 1000, so this is false and every chown keyed on
+ * it becomes a no-op: a non-root process cannot chown to a foreign UID, and
+ * chowning to its own UID would just spam EPERM (`fs.chown` succeeds only for
+ * CAP_CHOWN or a matching UID). Because the workdir was `mkdtemp`'d by us and
+ * the sandbox inherits our UID (no `--user` flag), files are already owned by
+ * the process that will execute them.
+ */
+export const isRootNode: boolean =
+  typeof process.geteuid === "function" && process.geteuid() === 0;
+
 export async function createWorkdir(uid: number): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), WORKDIR_PREFIX));
   try {
@@ -42,9 +56,7 @@ export async function createWorkdir(uid: number): Promise<string> {
     // to foreign UIDs. In that mode the mkdtemp'd dir is already owned
     // by our process UID, which is the same UID the sandbox child will
     // run as, so no chown is needed.
-    const effectiveUid =
-      typeof process.geteuid === "function" ? process.geteuid() : 0;
-    if (effectiveUid === 0 && uid !== 0) {
+    if (isRootNode && uid !== 0) {
       await fs.chown(dir, uid, uid);
     }
     await fs.chmod(dir, 0o700);

@@ -360,12 +360,6 @@ export async function runSandboxed(
   const cpuSec = cpuLimitSecFor(timeLimitMs);
   // --rlimit_fsize is in MB per nsjail's docs; --rlimit_as is in MB.
   const memLimitMb = Math.max(1, Math.floor(opts.memLimitMb));
-  // Optional caller override for --rlimit_as (VA space). Kept for
-  // future runtimes that need more virtual address space than the
-  // user-visible memory cap; currently unused by any language.
-  const rlimitAsMb = opts.rlimitAsMb !== undefined
-    ? Math.max(memLimitMb, Math.floor(opts.rlimitAsMb))
-    : memLimitMb;
   const maxStdoutBytes = capOf(opts.maxStdoutBytes, DEFAULT_MAX_STDOUT_BYTES);
   const maxStderrBytes = capOf(opts.maxStderrBytes, DEFAULT_MAX_STDERR_BYTES);
 
@@ -374,8 +368,6 @@ export async function runSandboxed(
   // etc. into a per-submission chroot. Chrooting into just the workdir
   // would hide the language runtimes (/usr/bin/python3, /usr/bin/g++
   // shims, etc.) from the child, breaking execve.
-  // `opts.chrootDir` is accepted in the type for forward-compat but
-  // ignored here until the runtime platform supports bind-mounting.
   //
   // No --user / --group: the Dockerfile drops Node to UID 1000 (see
   // `USER 1000` and the comment there). Asking nsjail to setresuid() to
@@ -419,7 +411,7 @@ export async function runSandboxed(
     // no-new-privs, with the full seccomp allow-list and rlimits.
     "--keep_caps",
     "--cwd", opts.cwd,
-    "--rlimit_as", argvInt(rlimitAsMb),
+    "--rlimit_as", argvInt(memLimitMb),
     "--rlimit_cpu", argvInt(cpuSec),
     // RLIMIT_NPROC is checked against the total task count for the REAL
     // UID, and --user/--group are deliberately absent, so this is one

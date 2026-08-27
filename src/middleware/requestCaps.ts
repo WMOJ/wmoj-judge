@@ -84,6 +84,55 @@ function tooLarge(res: Response, reason: string, limit: number): void {
   res.status(413).json({ error: "payload too large", reason, limit });
 }
 
+/** Render a cap for a human, without letting the literal drift from the constant. */
+export function formatCap(bytes: number): string {
+  return bytes % 1_000_000 === 0 ? `${bytes / 1_000_000}MB` : `${bytes} bytes`;
+}
+
+/**
+ * Validate one array-of-strings field against its per-case cap, accumulating
+ * into the running byte total and checking the aggregate as it grows.
+ *
+ * Returns the new total, or `null` when it has already sent the 413 — so the
+ * caller returns without touching `res` again. `input` and `output` differ only
+ * in their per-case cap and their wording, which is exactly why they share this
+ * rather than being maintained as two copies that drift.
+ */
+function checkCaseArray(
+  res: Response,
+  items: unknown[],
+  field: "input" | "output",
+  noun: string,
+  perCaseCap: number,
+  runningTotal: number,
+): number | null {
+  if (items.length > MAX_INPUT_CASES) {
+    tooLarge(res, `too many ${noun} (max ${MAX_INPUT_CASES})`, MAX_INPUT_CASES);
+    return null;
+  }
+
+  let total = runningTotal;
+  for (let i = 0; i < items.length; i += 1) {
+    const item = items[i];
+    if (typeof item !== "string") continue; // let route do shape 400
+    const n = byteLen(item);
+    if (n > perCaseCap) {
+      tooLarge(res, `${field}[${i}] exceeds ${formatCap(perCaseCap)}`, perCaseCap);
+      return null;
+    }
+    total += n;
+    if (total > MAX_TOTAL_REQUEST_BYTES) {
+      tooLarge(
+        res,
+        `total payload exceeds ${MAX_TOTAL_REQUEST_BYTES} bytes`,
+        MAX_TOTAL_REQUEST_BYTES,
+      );
+      return null;
+    }
+  }
+  return total;
+}
+
 /**
  * Express middleware that validates the body-size contract for
  * `/submit` and `/generate-tests`. Routes that don't carry a body
@@ -100,7 +149,8 @@ function tooLarge(res: Response, reason: string, limit: number): void {
  * `MAX_TOTAL_REQUEST_BYTES` that bounds the request as a whole. The
  * running total is checked as it accumulates rather than only at the
  * end, so an oversized body stops being measured as soon as it is
- * known to be over.
+ * known to be over — which is also why there is no final sweep: `code`
+ * and `checker` together cannot reach the aggregate cap on their own.
  */
 export function requestCaps(
   req: Request,
@@ -129,70 +179,15 @@ export function requestCaps(
   }
 
   if (Array.isArray(body.input)) {
-    if (body.input.length > MAX_INPUT_CASES) {
-      tooLarge(
-        res,
-        `too many test cases (max ${MAX_INPUT_CASES})`,
-        MAX_INPUT_CASES,
-      );
-      return;
-    }
-    for (let i = 0; i < body.input.length; i += 1) {
-      const item = body.input[i];
-      if (typeof item !== "string") continue; // let route do shape 400
-      const n = byteLen(item);
-      if (n > MAX_INPUT_BYTES_PER_CASE) {
-        tooLarge(res, `input[${i}] exceeds 1MB`, MAX_INPUT_BYTES_PER_CASE);
-        return;
-      }
-      total += n;
-      if (total > MAX_TOTAL_REQUEST_BYTES) {
-        tooLarge(
-          res,
-          `total payload exceeds ${MAX_TOTAL_REQUEST_BYTES} bytes`,
-          MAX_TOTAL_REQUEST_BYTES,
-        );
-        return;
-      }
-    }
+    const next = checkCaseArray(res, body.input, "input", "test cases", MAX_INPUT_BYTES_PER_CASE, total);
+    if (next === null) return;
+    total = next;
   }
 
   if (Array.isArray(body.output)) {
-    if (body.output.length > MAX_INPUT_CASES) {
-      tooLarge(
-        res,
-        `too many expected outputs (max ${MAX_INPUT_CASES})`,
-        MAX_INPUT_CASES,
-      );
-      return;
-    }
-    for (let i = 0; i < body.output.length; i += 1) {
-      const item = body.output[i];
-      if (typeof item !== "string") continue;
-      const n = byteLen(item);
-      if (n > MAX_OUTPUT_BYTES_PER_CASE) {
-        tooLarge(res, `output[${i}] exceeds 1MB`, MAX_OUTPUT_BYTES_PER_CASE);
-        return;
-      }
-      total += n;
-      if (total > MAX_TOTAL_REQUEST_BYTES) {
-        tooLarge(
-          res,
-          `total payload exceeds ${MAX_TOTAL_REQUEST_BYTES} bytes`,
-          MAX_TOTAL_REQUEST_BYTES,
-        );
-        return;
-      }
-    }
-  }
-
-  if (total > MAX_TOTAL_REQUEST_BYTES) {
-    tooLarge(
-      res,
-      `total payload exceeds ${MAX_TOTAL_REQUEST_BYTES} bytes`,
-      MAX_TOTAL_REQUEST_BYTES,
-    );
-    return;
+    const next = checkCaseArray(res, body.output, "output", "expected outputs", MAX_OUTPUT_BYTES_PER_CASE, total);
+    if (next === null) return;
+    total = next;
   }
 
   next();

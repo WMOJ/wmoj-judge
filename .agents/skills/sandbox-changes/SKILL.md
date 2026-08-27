@@ -124,10 +124,9 @@ is created — creating one needs privileges this container lacks. Their absence
 blocking rests on seccomp alone and why the pool UID is only a concurrency gate.
 
 **4. No `--chroot`.** Chrooting into the workdir would hide `/usr/bin/python3`, `/usr/bin/g++`, and
-the shared libraries from the child, breaking `execve` on every run. `SandboxOpts.chrootDir` is
-accepted by the type and ignored. **`rlimitAsMb` is NOT ignored** — `nsjail.ts` honours it as
-`max(memLimitMb, floor(rlimitAsMb))` and passes it as `--rlimit_as`, so setting it widens the
-address-space cap and silently disables MLE rule 3. `gid` is passed by every caller and never read.
+the shared libraries from the child, breaking `execve` on every run. `--rlimit_as` is always
+`memLimitMb`; there is no per-caller override, so it cannot drift from the enforced memory cap and
+silently disable MLE rule 3. `gid` is passed by every caller and never read.
 
 The rlimits, all in `--rlimit_*` form:
 

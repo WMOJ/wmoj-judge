@@ -15,7 +15,7 @@ import { createPool } from "../queue/workerPool";
 import { compileCache, cacheKey } from "../cache/compileCache";
 import { runSandboxed, MEM_LIMIT_RSS_RATIO } from "../sandbox/nsjail";
 import { acquireUid, releaseUid } from "../queue/uidPoolSingleton";
-import { createWorkdir, cleanupWorkdir } from "../util/workdir";
+import { createWorkdir, cleanupWorkdir, isRootNode } from "../util/workdir";
 import { executorFor } from "../executors";
 import { compare } from "../compare";
 import { compileChecker, runChecker } from "../checker";
@@ -711,19 +711,6 @@ submitRouter.post("/", async (req: Request, res: Response) => {
     }
   });
 });
-
-/**
- * True when Node is running as root (effective UID 0). Captured once at
- * module load. On Render we run Node as UID 1000 so this is false, and
- * every chownTree below becomes a no-op -- a non-root process cannot
- * chown to a foreign UID, and even chowning to our own UID would just
- * spam EPERM (fs.chown only succeeds for CAP_CHOWN or matching UID).
- * Because the workdir was mkdtemp'd by us and the sandbox inherits our
- * UID (no --user flag), files are already owned by the process that
- * will execute them -- no chown needed.
- */
-const isRootNode: boolean =
-  typeof process.geteuid === "function" && process.geteuid() === 0;
 
 /**
  * Recursively chown every entry under `dir` to `uid:uid`. Used after

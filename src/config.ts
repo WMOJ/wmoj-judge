@@ -187,8 +187,8 @@ function readPackageVersion(): string {
  * every restart.
  */
 function resolveVersion(): string {
-  const commit = process.env.RENDER_GIT_COMMIT;
-  if (commit !== undefined && commit.trim().length > 0) return commit.trim();
+  const commit = strEnv("RENDER_GIT_COMMIT", "");
+  if (commit) return commit;
   return `${readPackageVersion()}+${BOOTED_AT}`;
 }
 
@@ -309,6 +309,11 @@ export interface JudgeConfig {
   readonly NSJAIL_BIN: string;
   readonly SECCOMP_POLICY: string;
   readonly UNSAFE_DISABLE_SECCOMP: boolean;
+  /**
+   * `UNSAFE_DISABLE_SECCOMP` rendered for humans, derived here so the boot
+   * banner and every `/health` body cannot disagree about it.
+   */
+  readonly SECCOMP_STATUS: "enforced" | "disabled";
   readonly LOG_LEVEL: string;
   readonly VERSION: string;
 }
@@ -418,6 +423,7 @@ export const config: JudgeConfig = Object.freeze({
   // BPF filter (see the comment on the constant); `server.ts` logs a
   // banner and `/health` reports `seccomp: "disabled"` while it is on.
   UNSAFE_DISABLE_SECCOMP,
+  SECCOMP_STATUS: UNSAFE_DISABLE_SECCOMP ? "disabled" : "enforced",
   // LOG_LEVEL: unset in both .env.local and the Render dashboard —
   // default "info" applies.
   LOG_LEVEL: logLevelEnv(),

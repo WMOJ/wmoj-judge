@@ -150,7 +150,7 @@ async function main(): Promise<void> {
         authStrict: config.AUTH_STRICT,
         // Same rationale as authStrict: the other switch that weakens a
         // security boundary and leaves the service looking healthy.
-        seccomp: config.UNSAFE_DISABLE_SECCOMP ? "disabled" : "enforced",
+        seccomp: config.SECCOMP_STATUS,
         nodeEnv: config.NODE_ENV,
         version: config.VERSION,
       },

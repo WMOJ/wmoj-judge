@@ -1,17 +1,19 @@
 import { Router, type Request, type Response } from "express";
 import { promises as fs } from "fs";
 import * as path from "path";
-import { spawn } from "child_process";
 import { runSandboxed } from "../sandbox/nsjail";
 import { acquireUid, releaseUid } from "../queue/uidPoolSingleton";
 import { buildChildEnv } from "../sandbox/minimalEnv";
-import { createWorkdir, cleanupWorkdir } from "../util/workdir";
+import { runCompile, type CompileResult } from "../util/compile";
+import { createWorkdir, cleanupWorkdir, isRootNode } from "../util/workdir";
 import { logger } from "../util/logger";
 import { isDraining } from "../util/shutdown";
 import {
   MAX_INPUT_BYTES_PER_CASE,
+  MAX_OUTPUT_BYTES_PER_CASE,
   MAX_INPUT_CASES,
   MAX_TOTAL_REQUEST_BYTES,
+  formatCap,
 } from "../middleware/requestCaps";
 
 /**
@@ -75,77 +77,6 @@ const ACCEPTED_LANGUAGES_TEXT = ACCEPTED_LANGUAGES.join("/");
 const SUBMISSION_SOURCE_HEADROOM_BYTES = 200_000;
 
 /**
- * Cap on how much of the compiler's stdout/stderr we keep, per stream.
- *
- * The text goes into the 400's `error` string with no truncation of its
- * own. A generator engineered for diagnostic volume — deep template
- * instantiation, repeated `_Pragma("message(…)")` — makes g++ exit
- * quickly and cheaply while emitting hundreds of MB of stderr, and past
- * V8's max string length `stderr += …` throws `RangeError`
- * synchronously inside a stream `'data'` handler: an uncaught
- * exception, not a rejected promise. A compile timeout would not help;
- * it is the judge's heap that grows, not g++'s.
- */
-const MAX_DIAGNOSTIC_BYTES = 64 * 1024;
-
-/** Appended when a stream hit `MAX_DIAGNOSTIC_BYTES`. */
-const DIAGNOSTICS_TRUNCATED = "\n[diagnostics truncated by the judge]\n";
-
-/**
- * Attach a capped, decode-once collector to a compiler's stdio stream
- * and return a function that decodes everything collected.
- *
- * Same shape as `executors/cpp.ts` and `sandbox/nsjail.ts`: buffers are
- * accumulated and decoded **once**, at close. Decoding per chunk
- * (`stderr += chunk.toString()`) decodes each 64 KB pipe chunk in
- * isolation, so a multi-byte sequence straddling a chunk boundary
- * becomes U+FFFD on both sides — and `buildChildEnv` sets
- * `LC_ALL=C.UTF-8` while g++ quotes every identifier with
- * U+2018/U+2019, so that happens about once per diagnostic line.
- *
- * `stream` is nullable because `ChildProcess.prototype.spawn` returns
- * early on UV_EMFILE/UV_ENFILE *before* assigning `stdout`/`stderr`; a
- * bare `child.stderr.on(…)` would then throw a TypeError synchronously
- * inside the `new Promise` executor, rejecting where the caller expects
- * a discriminated `{ok:false}` — a 500 instead of the 400 the contract
- * promises for a failed compile. The `'error'` event still fires.
- */
-function collectCapped(stream: NodeJS.ReadableStream | null): () => string {
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  let truncated = false;
-
-  stream?.on("data", (chunk: Buffer) => {
-    const room = MAX_DIAGNOSTIC_BYTES - bytes;
-    if (room <= 0) {
-      truncated = true;
-      return;
-    }
-    if (chunk.length > room) {
-      chunks.push(chunk.subarray(0, room));
-      bytes = MAX_DIAGNOSTIC_BYTES;
-      truncated = true;
-      return;
-    }
-    chunks.push(chunk);
-    bytes += chunk.length;
-  });
-
-  return () => {
-    const text = Buffer.concat(chunks).toString("utf8");
-    return truncated ? `${text}${DIAGNOSTICS_TRUNCATED}` : text;
-  };
-}
-
-/**
- * True when Node is running as root. On Render we run as UID 1000 so
- * this is false and every chown below becomes a no-op -- same rationale
- * as in routes/submit.ts. Saves a syscall and avoids spamming EPERM.
- */
-const isRootNode: boolean =
-  typeof process.geteuid === "function" && process.geteuid() === 0;
-
-/**
  * Compile a generator's C++ source. Compilation runs OUTSIDE nsjail
  * (it's a trusted `g++` invocation on admin-submitted source, same
  * trust boundary as the existing /generate-tests endpoint) but uses
@@ -155,46 +86,16 @@ function compileGenerator(
   workDir: string,
   srcPath: string,
   outPath: string,
-): Promise<{ ok: true } | { ok: false; stderr: string }> {
-  return new Promise((resolve) => {
-    const env = buildChildEnv("cpp17");
-    const child = spawn(
-      "/usr/bin/g++",
-      // -fmax-errors bounds the diagnostics at the source. The capped
-      // collectors below bound what the judge *keeps*; this bounds what
-      // g++ spends CPU producing, on the one endpoint whose compile is
-      // neither sandboxed nor timed.
-      ["-O2", "-std=gnu++17", "-fmax-errors=50", srcPath, "-o", outPath],
-      { cwd: workDir, env, stdio: ["ignore", "pipe", "pipe"] },
-    );
-    // stdout is piped, so it MUST be drained: with `stdio: [.., "pipe", ..]`
-    // and no listener the pipe fills at 64 KB and g++ blocks on write
-    // forever, hanging the request with a UID-pool slot held.
-    const readStdout = collectCapped(child.stdout);
-    const readStderr = collectCapped(child.stderr);
-    child.on("error", (err) => {
-      resolve({ ok: false, stderr: `spawn error: ${err.message}` });
-    });
-    child.on("close", (code, signal) => {
-      if (code === 0) {
-        resolve({ ok: true });
-        return;
-      }
-      const stdout = readStdout();
-      const combined = readStderr() + (stdout ? `\n${stdout}` : "");
-      if (combined.trim().length > 0) {
-        resolve({ ok: false, stderr: combined });
-        return;
-      }
-      resolve({
-        ok: false,
-        stderr:
-          signal !== null
-            ? `g++ was killed by ${signal}`
-            : `g++ exited ${code} with no diagnostics`,
-      });
-    });
-  });
+): Promise<CompileResult> {
+  return runCompile(
+    // -fmax-errors bounds the diagnostics at the source. runCompile's capped
+    // collectors bound what the judge *keeps*; this bounds what g++ spends CPU
+    // producing, on the one endpoint whose compile is neither sandboxed nor
+    // timed.
+    ["/usr/bin/g++", "-O2", "-std=gnu++17", "-fmax-errors=50", srcPath, "-o", outPath],
+    workDir,
+    buildChildEnv("cpp17"),
+  );
 }
 
 /**
@@ -399,16 +300,20 @@ generateTestsRouter.post("/", async (req: Request, res: Response) => {
       if (inBytes > MAX_INPUT_BYTES_PER_CASE) {
         res.status(400).json({
           error: "generated test data exceeds the limits /submit enforces",
-          reason: `input[${i}] exceeds 1MB`,
+          reason: `input[${i}] exceeds ${formatCap(MAX_INPUT_BYTES_PER_CASE)}`,
           limit: MAX_INPUT_BYTES_PER_CASE,
         });
         return;
       }
-      if (outBytes > MAX_INPUT_BYTES_PER_CASE) {
+      // The OUTPUT cap, not the input one: this block's whole purpose is to
+      // reject here exactly what /submit would reject, and requestCaps measures
+      // `output` against MAX_OUTPUT_BYTES_PER_CASE. They are equal today, so
+      // using the wrong one changed nothing — right up until one of them moves.
+      if (outBytes > MAX_OUTPUT_BYTES_PER_CASE) {
         res.status(400).json({
           error: "generated test data exceeds the limits /submit enforces",
-          reason: `output[${i}] exceeds 1MB`,
-          limit: MAX_INPUT_BYTES_PER_CASE,
+          reason: `output[${i}] exceeds ${formatCap(MAX_OUTPUT_BYTES_PER_CASE)}`,
+          limit: MAX_OUTPUT_BYTES_PER_CASE,
         });
         return;
       }
