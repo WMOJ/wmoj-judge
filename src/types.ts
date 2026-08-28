@@ -208,17 +208,3 @@ export interface RunMeasurement {
 export type RunOutcome =
   | { ok: true; run: RunMeasurement }
   | { ok: false; sandboxError: string };
-
-export interface UidPool {
-  acquire(): Promise<number>;
-  release(uid: number): void;
-}
-
-export interface WorkerPool {
-  run<T>(task: () => Promise<T>): Promise<T>;
-}
-
-export interface CompileCache {
-  get(key: string): Promise<string | null>;
-  put(key: string, artifactDir: string): Promise<string>;
-}

@@ -1,7 +1,6 @@
 import { createHash, randomBytes } from "crypto";
 import { promises as fs } from "fs";
 import * as path from "path";
-import type { CompileCache } from "../types";
 import { config } from "../config";
 import { logger } from "../util/logger";
 
@@ -41,14 +40,14 @@ async function copyDir(src: string, dst: string): Promise<void> {
 }
 
 /**
- * TTL-evicting compile cache. Artifacts live under
- * `config.COMPILE_CACHE_DIR/<key>/` and are reclaimed on expiry, by the
+ * TTL-evicting compile cache. Artifacts live under `baseDir/<key>/`
+ * (`config.COMPILE_CACHE_DIR` in production) and are reclaimed on expiry, by the
  * sweep that runs every 60s. Nothing reclaims them at shutdown — the
  * process exits and `startupSweep()` removes the whole `judge-` prefixed
  * tree (which the default cache dir, `/tmp/judge-cache`, sits inside)
  * before the next boot repopulates it.
  */
-class DiskCompileCache implements CompileCache {
+export class DiskCompileCache {
   private readonly entries = new Map<string, CacheEntry>();
   private evictionTimer: NodeJS.Timeout | null = null;
   private bootstrapped = false;
@@ -167,9 +166,13 @@ class DiskCompileCache implements CompileCache {
 
   /**
    * Remove expired entries both from the in-memory map and from disk.
-   * Only ever called by the background timer started in `start()`.
+   * Called by the background timer started in `start()`, and directly by
+   * `test/unit/compileCache.test.ts`, which is the only reason it is not
+   * private: the sweep is the one path that reclaims disk while the
+   * process lives, and a test that had to wait for a 60 s interval to
+   * exercise it would never run.
    */
-  private async evictExpired(): Promise<void> {
+  async evictExpired(): Promise<void> {
     const now = Date.now();
     const toRemove: string[] = [];
     for (const [key, entry] of this.entries) {

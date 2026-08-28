@@ -9,7 +9,7 @@ import type {
 } from "../types";
 import { config } from "../config";
 import { submitSemaphore } from "../queue/globalSemaphore";
-import { createPool } from "../queue/workerPool";
+import pLimit from "p-limit";
 import { compileCache, cacheKey } from "../cache/compileCache";
 import { runSandboxed } from "../sandbox/nsjail";
 import { gradeCase, type CaseLimits, type Judge } from "../verdict";
@@ -176,7 +176,7 @@ export const submitRouter: Router = Router();
  *  6. put artifact in cache
  *  7. compile the custom checker once, if one was supplied
  *     (checker compile fail → HTTP 200 with checkerError)
- *  8. per-submission worker pool runs each test
+ *  8. per-submission p-limit runs each test
  *  9. each test: nsjail measures → `gradeCase` decides, calling the
  *     checker or the comparator only if the program finished cleanly
  * 10. every case settles (none may still be running), then sort by
@@ -331,8 +331,11 @@ submitRouter.post("/", async (req: Request, res: Response) => {
         }
       }
 
-      // Per-submission pool: bound test-case parallelism within this submission.
-      const pool = createPool(config.PER_SUBMISSION_CONCURRENCY);
+      // Per-submission limit: bound test-case parallelism within this
+      // submission. p-limit used as itself, exactly as `globalSemaphore.ts`
+      // does for the submission count -- the adapter that used to wrap it
+      // here existed for a substitution nothing ever made.
+      const limit = pLimit(config.PER_SUBMISSION_CONCURRENCY);
 
       // First judge fault seen by any case. Set once, read by every case
       // still queued behind it so they return immediately instead of
@@ -340,7 +343,7 @@ submitRouter.post("/", async (req: Request, res: Response) => {
       let abortReason: Error | null = null;
 
       const resultPromises = payload.input.map((rawInput, i) =>
-        pool.run(async (): Promise<CaseOutcome> => {
+        limit(async (): Promise<CaseOutcome> => {
           if (abortReason !== null) {
             return { ok: false, error: abortReason };
           }

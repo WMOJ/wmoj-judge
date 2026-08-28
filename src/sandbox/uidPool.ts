@@ -1,4 +1,3 @@
-import type { UidPool } from "../types";
 import { logger } from "../util/logger";
 
 /**
@@ -32,7 +31,10 @@ type Waiter = (uid: number) => void;
  * sharing the same host would collide, but the judge runs one Node
  * process per container so that is not a concern.
  */
-export function createUidPool(size: number): UidPool {
+export function createUidPool(size: number): {
+  acquire: () => Promise<number>;
+  release: (uid: number) => void;
+} {
   if (!Number.isInteger(size) || size <= 0) {
     throw new Error(`uidPool size must be a positive integer, got ${size}`);
   }
@@ -69,8 +71,8 @@ export function createUidPool(size: number): UidPool {
    * check is value-based and there is nothing in a bare `number` to
    * identify *who* is releasing; closing that gap means `acquire()`
    * returning an opaque lease (`{uid, release()}`) so a stale release is
-   * identity-checked, which is a change to the `UidPool` interface in
-   * `types.ts`.
+   * identity-checked, which is a change to the shape this factory
+   * returns.
    *
    * Not reachable today: both call sites (`routes/submit.ts`,
    * `routes/generateTests.ts`) release exactly once, in a `finally`. The

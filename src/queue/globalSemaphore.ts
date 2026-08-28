@@ -6,8 +6,9 @@ import { config } from "../config";
  * for the lifetime of the process. Acquire via `submitSemaphore(fn)` —
  * if the cap is reached, further callers queue until a slot frees up.
  *
- * This is distinct from the per-submission worker pool in workerPool.ts:
+ * This is distinct from the per-submission `pLimit` in `routes/submit.ts`:
  * that one bounds test-case parallelism *within* one submission;
- * this one bounds how many submissions run at all.
+ * this one bounds how many submissions run at all. Both use p-limit as
+ * itself -- one policy, no adapter.
  */
 export const submitSemaphore = pLimit(config.GLOBAL_SUBMIT_CONCURRENCY);

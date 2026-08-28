@@ -1,5 +1,4 @@
 import type { CompareMode } from "../types";
-import { compareExact } from "./exact";
 import { compareTrimTrailing } from "./trimTrailing";
 import { compareWhitespace } from "./whitespace";
 import { compareFloatEpsilon } from "./floatEpsilon";
@@ -21,7 +20,8 @@ export function compare(
 ): boolean {
   switch (mode) {
     case "exact":
-      return compareExact(expected, received);
+      // Byte-for-byte. Six lines in its own file was a seam nothing crossed.
+      return expected === received;
     case "trim-trailing":
       return compareTrimTrailing(expected, received);
     case "whitespace":
