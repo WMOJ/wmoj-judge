@@ -76,11 +76,12 @@ Two properties to keep in mind:
   report as a judge fault. Every ordinary TLE — RLIMIT_CPU firing inside the jail — still reports
   real numbers.
 
-**`sandboxSelfCheck()`** in `nsjail.ts` is the loudness guarantee: it runs a shell loop that
-overspends a 50 ms budget and fails unless a report arrived with a non-zero `cpuMs` at or above the
-budget. The other half — that the ladder turns that measurement into `TO` — is the `selfcheck`
-measurement fixture replayed by `test/unit/verdict.test.ts`. It also doubles as the
-nsjail/`policy.kafel` boot probe. `server.ts` awaits it at boot and refuses to start on `ok: false`.
+**The `sandbox-measures` liveness check** (`src/liveness`) is the loudness guarantee: it runs a
+shell loop that overspends a 50 ms budget and fails unless a report arrived with a non-zero `cpuMs`
+**and** `gradeCase` grades that measurement `TLE`. Boot asserts it and refuses to start; `/health`
+re-runs it every 5 min, so a reporter that dies after boot turns the instance degraded instead of
+leaving it green. The `selfcheck` measurement fixture is the same assertion replayed in-process. It
+also doubles as the nsjail/`policy.kafel` boot probe.
 
 ## The four timers, and the order they must stay in
 

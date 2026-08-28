@@ -41,6 +41,10 @@ or could not answer (`IE`). Never the student's.
 
 **Drain**: The 25 s window after `SIGTERM` in which routes 503 and in-flight work finishes.
 
+**Liveness**: Whether the judge can grade correctly right now — one list of checks in
+`src/liveness`, asserted at boot and served by `/health` on two cadences.
+_Avoid_: health check (for the module), probe (for the whole)
+
 ## Verification
 
 **Golden transcript**: A recorded `/submit` or `/generate-tests` exchange, replayed against a live

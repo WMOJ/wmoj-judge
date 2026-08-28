@@ -362,10 +362,11 @@ const SCENARIOS: readonly CaptureScenario[] = [
   {
     name: "selfcheck",
     intended: "TLE",
-    // The exact probe `sandboxSelfCheck` runs at boot. Until the liveness
-    // module restores the ladder assertion in production, THIS fixture
-    // plus `verdict.test.ts` is what proves the probe's CPU burn really
-    // does grade TLE — the half the boot check stopped asserting.
+    // The exact probe the `sandbox-measures` liveness check runs at boot
+    // and every five minutes. Production asserts the TLE on a live
+    // kernel; this fixture is the same assertion replayed in-process, so
+    // a ladder change that would make the judge refuse to boot fails
+    // `npm test` first.
     note: "ladder step 2 — the boot liveness probe's own shell loop against its 50ms budget",
     requires: [],
     program: {

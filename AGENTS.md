@@ -37,8 +37,7 @@ verdict-affecting change is not verified until CI is green.** Tests live in `tes
 - **Won't run natively on macOS** — nsjail is Linux-only. Use Docker.
 - **`.env.local` is intentionally not loaded** (no `dotenv`, no `--env-file`); local runs fall back
   to `AUTH_STRICT=false`. Production vars come from the Render dashboard.
-- The judge **refuses to boot** unless `python3`, `pypy3` and `g++` resolve, nsjail launches with
-  `policy.kafel`, **and** a probe run reports non-zero `cpuMs`. A judge that cannot measure must not
+- **Refuses to boot** unless every `src/liveness` check passes — a judge that cannot measure must not
   accept submissions. `NODE_ENV=production` is baked in, so a missing `JUDGE_SHARED_SECRET` exits 1.
 - **Build `--platform=linux/amd64`.** `policy.kafel` targets the amd64 syscall table; built for
   arm64 it will not compile and nsjail exits 255, so the boot probe above refuses to start.
@@ -83,8 +82,9 @@ It now enforces the same per-case and aggregate caps `/submit` will later apply,
 admin test data the judge would refuse. Limits 60 s / 1024 MB, bypassing the host clamp. Documented
 admin-only but **not enforced**, and it **bypasses the global semaphore**.
 
-**`GET /health`** — unauthenticated by design (Render probes). Four checks — the three toolchains
-**and the sandbox itself** — single-flighted, cached 30 s: `200 {status,version,seccomp}`, `503
+**`GET /health`** — unauthenticated by design (Render probes). Five checks in `src/liveness`: three
+toolchains and a sandbox launch every 30 s, the sandbox *measuring* (the CPU-time self-check that
+once ran only at boot) every 5 min; boot runs all five. `200 {status,version,seccomp}`, `503
 {status:"degraded",reason,version,seccomp}`, or 503 `"draining"` while shutting down. `version` is
 `RENDER_GIT_COMMIT` if set, else package version + start time; `seccomp` is `enforced`/`disabled`.
 

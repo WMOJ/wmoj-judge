@@ -256,8 +256,8 @@ const DEFAULT_GLOBAL_SUBMIT_CONCURRENCY = Math.max(
  * host (an Apple Silicon laptop) that image runs under QEMU user-mode
  * emulation, and the emulator cannot install an amd64 BPF program on an
  * arm64 kernel: `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER)` returns
- * EINVAL, nsjail exits 255 before executing anything, and
- * `sandboxSelfCheck()` correctly refuses to boot. That refusal is right
+ * EINVAL, nsjail exits 255 before executing anything, and the liveness
+ * checks correctly refuse to boot. That refusal is right
  * — it replaced a judge that booted green and graded every submission
  * `RE` — but it also means the service cannot be run at all on the
  * hardware most of its contributors own. Neither

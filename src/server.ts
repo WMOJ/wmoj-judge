@@ -9,9 +9,9 @@ import { createRateLimiter } from "./middleware/rateLimit";
 import { requestCaps, JSON_BODY_LIMIT } from "./middleware/requestCaps";
 import { submitRouter } from "./routes/submit";
 import { generateTestsRouter } from "./routes/generateTests";
-import { healthRouter, probeToolchainAtBoot } from "./routes/health";
+import { healthRouter } from "./routes/health";
 import { startCompileCache } from "./cache/compileCache";
-import { sandboxSelfCheck } from "./sandbox/nsjail";
+import { liveness } from "./liveness";
 
 /**
  * Bump the in-flight counter `shutdown()` drains against.
@@ -106,35 +106,15 @@ async function main(): Promise<void> {
   }
 
   await startupSweep();
-  await probeToolchainAtBoot();
-
-  // Refuse to boot unless the sandbox both RUNS and MEASURES.
-  //
-  // `probeToolchainAtBoot` only checks that python3/pypy3/g++ exist. It cannot
-  // catch either of the two failures that actually shipped here:
-  //
-  //   * nsjail starting and bailing — an unreadable or uncompilable
-  //     `policy.kafel` makes it exit 255 with an empty child stderr, and every
-  //     test case of every submission comes back `RE` on a clean HTTP 200 while
-  //     /health reports "ok". Reproduced in a container on this repo.
-  //   * the sandbox running but reporting nothing — `cpuMs`/`memKb` were `0` on
-  //     every run for the entire life of the nsjail 3.3 pin, because the code
-  //     scraped them from a log format nsjail does not emit. That silently
-  //     disabled the authoritative CPU-time TLE gate and both RSS-based MLE
-  //     rules. Confirmed in production data: 3,457 stored cases, zero non-zero
-  //     cpuMs, and 94 real timeouts recorded as `WA`.
-  //
-  // `sandboxSelfCheck` runs a CPU-bound probe against a 50 ms limit and fails
-  // if the ladder does not return `TO` or if `cpuMs` comes back 0. Exiting here
-  // is the point: a judge that cannot measure must not accept submissions,
-  // because every verdict it produces would be wrong and nothing downstream
-  // would notice.
-  const selfCheck = await sandboxSelfCheck();
-  if (!selfCheck.ok) {
-    logger.fatal({ error: selfCheck.error }, "sandbox self-check failed; refusing to start");
-    process.exit(1);
-  }
-  logger.info({ ...selfCheck.value }, "sandbox self-check passed");
+  // Refuse to boot unless every liveness check passes -- the toolchains,
+  // a sandbox that launches, and a sandbox that MEASURES. The two
+  // failures the last one exists for (an uncompilable `policy.kafel`
+  // grading every case `RE`; a reporter whose numbers are all zero,
+  // which disabled every CPU and RSS gate for the life of the nsjail 3.3
+  // pin) are documented beside the checks in `src/liveness`. The same
+  // list answers /health afterwards, so a judge that stops measuring
+  // after boot goes degraded instead of staying green.
+  await liveness.assertAtBoot();
 
   startCompileCache();
   // AUTH_STRICT goes in the boot line because it is the only switch

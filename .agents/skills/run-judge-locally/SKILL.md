@@ -39,10 +39,11 @@ emulation, and QEMU cannot install an amd64 BPF program on an arm64 kernel:
 [F] runChild():483 Launching child process failed
 ```
 
-nsjail exits 255, `sandboxSelfCheck()` fails, and the judge **refuses to boot**:
+nsjail exits 255, the `sandbox-launch` and `sandbox-measures` liveness checks fail, and the judge
+**refuses to boot**:
 
 ```
-{"level":50,...,"failures":["sandbox: sandbox launch failed: /bin/true exited 255"],"msg":"runtime probes failed at boot"}
+{"level":50,...,"failures":["sandbox-launch: sandbox launch failed: /bin/true exited 255","sandbox-measures: sandbox self-check could not run: nsjail failed to start the jail (exit 255)"],"msg":"liveness checks failed at boot"}
 {"level":50,...,"msg":"fatal: boot failed"}
 ```
 
@@ -106,12 +107,13 @@ Set `AUTH_STRICT=true` explicitly. It defaults to `IS_PROD`, so `NODE_ENV=develo
 the token check off, and in soft mode a *missing* token is let through too — which hides a
 secret mismatch between the judge and `wmoj-app` until production.
 
-Boot takes ~20 s under emulation, mostly the sandbox self-check. Expect these lines:
+Boot takes ~20 s under emulation, mostly the `sandbox-measures` liveness check. Expect these
+lines:
 
 ```
 {"level":40,...,"seccomp":"disabled",...,"msg":"!!!!! SECCOMP FILTER DISABLED (UNSAFE_DISABLE_SECCOMP=true) !!!!! ..."}
-{"level":30,...,"msg":"runtime probes passed"}
-{"level":30,...,"cpuMs":2039,...,"msg":"sandbox self-check passed"}
+{"level":30,...,"cpuMs":2039,...,"msg":"liveness: sandbox measured"}
+{"level":30,...,"msg":"liveness checks passed"}
 {"level":30,...,"port":4001,"authStrict":true,"seccomp":"disabled",...,"msg":"judge listening"}
 ```
 
@@ -211,11 +213,12 @@ Guards, all three of which are load-bearing:
    every other rejected env value behaves at this boundary.
 3. `server.ts` logs the banner before the boot probes, and `/health` reports `seccomp: "disabled"`.
 
-The boot probe is **not** weakened. `probeSandbox` still launches a real jailed `/bin/true` in both
-modes and `sandboxSelfCheck` still demands a measured, non-zero `cpuMs`; the only
-difference is that the `fs.access(SECCOMP_POLICY)` readability check is skipped when no policy is
-going to be installed. `probeSandbox` also fails on `ok: false` from `runSandboxed`, so a runner that launches but
-writes no resource report makes `/health` degraded instead of ok. Never bypass either probe to make
+The liveness checks are **not** weakened. `sandbox-launch` still runs a real jailed `/bin/true` in
+both modes and `sandbox-measures` still demands a measured, non-zero `cpuMs` that grades `TLE`; the
+only difference is that the `fs.access(SECCOMP_POLICY)` readability check is skipped when no policy
+is going to be installed. `sandbox-launch` also fails on `ok: false` from `runSandboxed`, so a runner
+that launches but writes no resource report makes `/health` degraded within 30 s instead of ok, and
+a reporter whose numbers are zero makes it degraded within 5 min. Never bypass either check to make
 something boot.
 
 Never run this mode anywhere other people can reach, and never as a way to make a submission work.

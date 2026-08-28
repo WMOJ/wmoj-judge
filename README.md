@@ -61,7 +61,8 @@ docker run --rm --name wmoj-judge-local -p 4001:4001 --platform=linux/amd64 \
 The judge does not read a `.env` file. There is no dotenv and no `--env-file`, so pass everything
 with `-e`. `.env.example` documents every variable.
 
-Boot takes about 20 seconds under emulation, most of it the sandbox self-check. Then:
+Boot takes about 20 seconds under emulation, most of it the `sandbox-measures` liveness check.
+Then:
 
 ```bash
 curl -s http://localhost:4001/health
