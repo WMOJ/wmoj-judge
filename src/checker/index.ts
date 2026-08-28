@@ -214,11 +214,14 @@ function truncateBytes(s: string, maxBytes: number): string {
  * Note what is deliberately NOT consulted: the kill ladder. It lives in
  * `src/verdict` now and applies the *submission's* limits, not the
  * checker's. Every way a checker is actually killed still lands here —
- * `RLIMIT_CPU` and `RLIMIT_AS` both end in a signal, so a `signalled`
- * status; the judge's last-resort kill sets `nodeTimerFired`; a signalled
- * runner sets `runnerSignal`. What the ladder would have added on top is
- * "the checker answered, but spent more than its budget doing so", and a
- * checker that answered is a checker that answered.
+ * `RLIMIT_CPU` ends in a signal, and so does an `RLIMIT_AS` refusal the
+ * checker does not catch (an uncaught `bad_alloc` aborts), so a
+ * `signalled` status; the judge's last-resort kill sets `nodeTimerFired`;
+ * a signalled runner sets `runnerSignal`. A checker that catches the
+ * refusal and exits 1 has answered, and `rejected` is its answer. What
+ * the ladder would have added on top is "the checker answered, but spent
+ * more than its budget doing so", and a checker that answered is a
+ * checker that answered.
  */
 export function classifyCheckerResult(run: RunMeasurement): CheckerVerdict {
   const message = truncateBytes(run.stderr.trim(), CHECKER_MESSAGE_MAX_BYTES);

@@ -651,7 +651,7 @@ export const SCENARIOS: readonly Scenario[] = [
     endpoint: "/generate-tests",
     request: { language: "cpp", code: program("generator-nonzero-exit.cpp") },
     requires: [],
-    intended: "400 naming the generator's exit code (the text changes in the verdict commit)",
+    intended: "400 naming the generator's exit code, and why it ended when the judge killed it",
   },
   {
     name: "generator-bad-json",

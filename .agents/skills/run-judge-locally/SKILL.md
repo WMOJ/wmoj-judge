@@ -156,9 +156,9 @@ It re-POSTs every recorded `/submit` and `/generate-tests` exchange in `test/fix
 the answers. On arm64 the fixtures tagged `rlimit_as`, `seccomp` or `native` (the MLE ones, the
 seccomp-denied socket, and the runs whose stderr QEMU pollutes — a signal death prints
 `qemu: uncaught target signal …`, PyPy warns about the emulated `/proc/cpuinfo`) are skipped **by
-name**, because emulation cannot reproduce them — CI replays those on an amd64 kernel. Start the container with `-e RATE_LIMIT_MAX=1000` if you capture and
-replay within the same minute: the default 60/min bucket is shared by both gated routes and a
-capture plus a replay is 75 requests.
+name**, because emulation cannot reproduce them — CI replays those on an amd64 kernel. Start the
+container with `-e RATE_LIMIT_MAX=1000` if you capture and replay within the same minute: the
+default 60/min bucket is shared by both gated routes and a capture plus a replay is 75 requests.
 
 Measured on an M1 Pro under emulation, for calibration: python3 ~210 ms/case, pypy3 ~220 ms/case, a
 `bits/stdc++.h` C++ submission ~6.7 s end to end (nearly all of it g++). Give `timeLimit` plenty of

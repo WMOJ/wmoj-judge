@@ -74,8 +74,8 @@ export function createUidPool(size: number): {
    * identity-checked, which is a change to the shape this factory
    * returns.
    *
-   * Not reachable today: both call sites (`routes/submit.ts`,
-   * `routes/generateTests.ts`) release exactly once, in a `finally`. The
+   * Not reachable today: the one call site, `leaseWorkspace` in
+   * `src/workspace`, releases exactly once, in a `finally`. The
    * `warn` below is the tripwire for the half that *is* detectable —
    * this pool is the judge's true concurrency ceiling, so a silent
    * accounting drift here shrinks it permanently with no other symptom.
