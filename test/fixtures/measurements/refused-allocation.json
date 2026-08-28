@@ -1,0 +1,44 @@
+{
+  "name": "refused-allocation",
+  "intended": "MLE",
+  "note": "memory — a refused allocation, exit 134 with std::bad_alloc on stderr",
+  "requires": [
+    "rlimit_as"
+  ],
+  "limits": {
+    "timeLimitMs": 2000,
+    "memLimitMb": 256
+  },
+  "expected": "",
+  "outcome": {
+    "ok": true,
+    "run": {
+      "exitCode": 134,
+      "runnerSignal": null,
+      "parentWallMs": 138,
+      "nodeTimerFired": false,
+      "stdout": "",
+      "stderr": "terminate called after throwing an instance of 'std::bad_alloc'\n  what():  std::bad_alloc\n",
+      "truncated": false,
+      "cpuMs": 7,
+      "maxRssKb": 7752,
+      "jailWallMs": 136,
+      "nsjailExit": 134,
+      "nsjailSignal": 0
+    }
+  },
+  "result": {
+    "index": 0,
+    "exitCode": 134,
+    "passed": false,
+    "expected": "",
+    "received": "",
+    "stderr": "terminate called after throwing an instance of 'std::bad_alloc'\n  what():  std::bad_alloc\n",
+    "stdout": "",
+    "timedOut": false,
+    "verdict": "MLE",
+    "timeMs": 136,
+    "cpuMs": 7,
+    "memKb": 7752
+  }
+}

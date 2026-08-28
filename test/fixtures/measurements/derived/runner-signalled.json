@@ -1,0 +1,44 @@
+{
+  "name": "runner-signalled",
+  "intended": "RE",
+  "note": "ladder step 7 — the runner itself was signalled, so nothing of the program is trustworthy",
+  "requires": [],
+  "derivedFrom": "clean-exit",
+  "transformation": "exitCode: null; runnerSignal: SIGKILL",
+  "limits": {
+    "timeLimitMs": 2000,
+    "memLimitMb": 256
+  },
+  "expected": "42\n",
+  "outcome": {
+    "ok": true,
+    "run": {
+      "exitCode": null,
+      "runnerSignal": "SIGKILL",
+      "parentWallMs": 8,
+      "nodeTimerFired": false,
+      "stdout": "42\n",
+      "stderr": "",
+      "truncated": false,
+      "cpuMs": 6,
+      "maxRssKb": 7744,
+      "jailWallMs": 6,
+      "nsjailExit": 0,
+      "nsjailSignal": 0
+    }
+  },
+  "result": {
+    "index": 0,
+    "exitCode": null,
+    "passed": false,
+    "expected": "42\n",
+    "received": "42\n",
+    "stderr": "",
+    "stdout": "42\n",
+    "timedOut": false,
+    "verdict": "RE",
+    "timeMs": 6,
+    "cpuMs": 6,
+    "memKb": 7744
+  }
+}

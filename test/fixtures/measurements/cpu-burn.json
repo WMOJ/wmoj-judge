@@ -1,0 +1,42 @@
+{
+  "name": "cpu-burn",
+  "intended": "TLE",
+  "note": "ladder step 2 before step 3 — burns ~1s of CPU then exit(0) on a 500ms limit",
+  "requires": [],
+  "limits": {
+    "timeLimitMs": 500,
+    "memLimitMb": 256
+  },
+  "expected": "",
+  "outcome": {
+    "ok": true,
+    "run": {
+      "exitCode": 0,
+      "runnerSignal": null,
+      "parentWallMs": 1009,
+      "nodeTimerFired": false,
+      "stdout": "",
+      "stderr": "",
+      "truncated": false,
+      "cpuMs": 1007,
+      "maxRssKb": 7472,
+      "jailWallMs": 1007,
+      "nsjailExit": 0,
+      "nsjailSignal": 0
+    }
+  },
+  "result": {
+    "index": 0,
+    "exitCode": 0,
+    "passed": false,
+    "expected": "",
+    "received": "",
+    "stderr": "",
+    "stdout": "",
+    "timedOut": true,
+    "verdict": "TLE",
+    "timeMs": 1007,
+    "cpuMs": 1007,
+    "memKb": 7472
+  }
+}

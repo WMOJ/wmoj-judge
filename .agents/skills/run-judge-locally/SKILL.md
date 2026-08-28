@@ -172,8 +172,22 @@ locally and is graded on its output (`WA`, usually) instead of `MLE`. QEMU ignor
 because it needs the address space itself.
 
 `RLIMIT_CPU` and `RLIMIT_NOFILE` **do** come through, `wmoj-jailrun` reports real `cpuMs`/`memKb`,
-and TLE works. Anything touching `isMemoryLimitExceeded` or the MLE rules cannot be verified on an
-arm64 machine — check it on real amd64 hardware.
+and TLE works. Anything touching the MLE rules in `src/verdict` cannot be verified on an arm64
+machine — check it on real amd64 hardware, which is what the CI `e2e` and `recapture-measurements`
+jobs do.
+
+The measurement fixtures in `test/fixtures/measurements` are recorded by a tool that runs *inside*
+the image, because it needs nsjail:
+
+```bash
+docker run --rm -e LOG_LEVEL=silent -e JUDGE_SHARED_SECRET=x \
+  -e NODE_ENV=development -e UNSAFE_DISABLE_SECCOMP=true \
+  --entrypoint node wmoj-judge:local dist/tools/captureMeasurements.js > fresh.json
+```
+
+(`LOG_LEVEL=silent` because pino writes to stdout and the JSON must be the only thing there.) On
+arm64 it records every scenario but only asserts the ones that do not need `rlimit_as`/`seccomp`;
+the committed set is captured on the x86_64 runner and reviewed by hand.
 
 ## The escape hatch, precisely
 
@@ -198,9 +212,9 @@ Guards, all three of which are load-bearing:
 3. `server.ts` logs the banner before the boot probes, and `/health` reports `seccomp: "disabled"`.
 
 The boot probe is **not** weakened. `probeSandbox` still launches a real jailed `/bin/true` in both
-modes and `sandboxSelfCheck` still demands a non-zero `cpuMs` and a `TO` classification; the only
+modes and `sandboxSelfCheck` still demands a measured, non-zero `cpuMs`; the only
 difference is that the `fs.access(SECCOMP_POLICY)` readability check is skipped when no policy is
-going to be installed. `probeSandbox` also fails on a `sandboxError`, so a runner that launches but
+going to be installed. `probeSandbox` also fails on `ok: false` from `runSandboxed`, so a runner that launches but
 writes no resource report makes `/health` degraded instead of ok. Never bypass either probe to make
 something boot.
 

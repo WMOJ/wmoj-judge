@@ -8,7 +8,7 @@
   "requires": [],
   "status": 400,
   "response": {
-    "error": "Generator exited with code 2 (ok)",
+    "error": "Generator exited with code 2",
     "inputJson": "",
     "outputJson": ""
   },

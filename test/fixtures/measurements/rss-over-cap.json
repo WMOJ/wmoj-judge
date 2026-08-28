@@ -1,0 +1,44 @@
+{
+  "name": "rss-over-cap",
+  "intended": "MLE",
+  "note": "ladder step 5 — RSS at the cap on a run that filled its address space and exited by itself",
+  "requires": [
+    "rlimit_as"
+  ],
+  "limits": {
+    "timeLimitMs": 2000,
+    "memLimitMb": 1024
+  },
+  "expected": "",
+  "outcome": {
+    "ok": true,
+    "run": {
+      "exitCode": 1,
+      "runnerSignal": null,
+      "parentWallMs": 481,
+      "nodeTimerFired": false,
+      "stdout": "",
+      "stderr": "",
+      "truncated": false,
+      "cpuMs": 479,
+      "maxRssKb": 1042124,
+      "jailWallMs": 480,
+      "nsjailExit": 1,
+      "nsjailSignal": 0
+    }
+  },
+  "result": {
+    "index": 0,
+    "exitCode": 1,
+    "passed": false,
+    "expected": "",
+    "received": "",
+    "stderr": "",
+    "stdout": "",
+    "timedOut": false,
+    "verdict": "MLE",
+    "timeMs": 480,
+    "cpuMs": 479,
+    "memKb": 1042124
+  }
+}

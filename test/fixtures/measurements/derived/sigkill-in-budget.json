@@ -1,0 +1,44 @@
+{
+  "name": "sigkill-in-budget",
+  "intended": "RE",
+  "note": "ladder step 6 — a SIGKILL inside the budget stays a runtime error",
+  "requires": [],
+  "derivedFrom": "segfault",
+  "transformation": "exitCode: 137; jailWallMs: 100",
+  "limits": {
+    "timeLimitMs": 2000,
+    "memLimitMb": 256
+  },
+  "expected": "",
+  "outcome": {
+    "ok": true,
+    "run": {
+      "exitCode": 137,
+      "runnerSignal": null,
+      "parentWallMs": 106,
+      "nodeTimerFired": false,
+      "stdout": "",
+      "stderr": "",
+      "truncated": false,
+      "cpuMs": 6,
+      "maxRssKb": 7544,
+      "jailWallMs": 100,
+      "nsjailExit": 139,
+      "nsjailSignal": 0
+    }
+  },
+  "result": {
+    "index": 0,
+    "exitCode": 137,
+    "passed": false,
+    "expected": "",
+    "received": "",
+    "stderr": "",
+    "stdout": "",
+    "timedOut": false,
+    "verdict": "RE",
+    "timeMs": 100,
+    "cpuMs": 6,
+    "memKb": 7544
+  }
+}

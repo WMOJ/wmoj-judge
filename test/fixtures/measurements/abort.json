@@ -1,0 +1,44 @@
+{
+  "name": "abort",
+  "intended": "RE",
+  "note": "ladder step 6 — SIGABRT as 128+6, exit 134 with NO allocation text",
+  "requires": [
+    "native"
+  ],
+  "limits": {
+    "timeLimitMs": 2000,
+    "memLimitMb": 256
+  },
+  "expected": "",
+  "outcome": {
+    "ok": true,
+    "run": {
+      "exitCode": 134,
+      "runnerSignal": null,
+      "parentWallMs": 119,
+      "nodeTimerFired": false,
+      "stdout": "",
+      "stderr": "",
+      "truncated": false,
+      "cpuMs": 8,
+      "maxRssKb": 7196,
+      "jailWallMs": 117,
+      "nsjailExit": 134,
+      "nsjailSignal": 0
+    }
+  },
+  "result": {
+    "index": 0,
+    "exitCode": 134,
+    "passed": false,
+    "expected": "",
+    "received": "",
+    "stderr": "",
+    "stdout": "",
+    "timedOut": false,
+    "verdict": "RE",
+    "timeMs": 117,
+    "cpuMs": 8,
+    "memKb": 7196
+  }
+}

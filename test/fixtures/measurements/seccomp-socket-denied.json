@@ -1,0 +1,44 @@
+{
+  "name": "seccomp-socket-denied",
+  "intended": "AC",
+  "note": "seccomp — socket() returns -1/EPERM rather than killing the process",
+  "requires": [
+    "seccomp"
+  ],
+  "limits": {
+    "timeLimitMs": 2000,
+    "memLimitMb": 256
+  },
+  "expected": "fd=-1 errno=1\n",
+  "outcome": {
+    "ok": true,
+    "run": {
+      "exitCode": 0,
+      "runnerSignal": null,
+      "parentWallMs": 10,
+      "nodeTimerFired": false,
+      "stdout": "fd=-1 errno=1\n",
+      "stderr": "",
+      "truncated": false,
+      "cpuMs": 7,
+      "maxRssKb": 7468,
+      "jailWallMs": 8,
+      "nsjailExit": 0,
+      "nsjailSignal": 0
+    }
+  },
+  "result": {
+    "index": 0,
+    "exitCode": 0,
+    "passed": true,
+    "expected": "fd=-1 errno=1\n",
+    "received": "fd=-1 errno=1\n",
+    "stderr": "",
+    "stdout": "fd=-1 errno=1\n",
+    "timedOut": false,
+    "verdict": "AC",
+    "timeMs": 8,
+    "cpuMs": 7,
+    "memKb": 7468
+  }
+}

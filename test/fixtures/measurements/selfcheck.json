@@ -1,0 +1,42 @@
+{
+  "name": "selfcheck",
+  "intended": "TLE",
+  "note": "ladder step 2 — the boot liveness probe's own shell loop against its 50ms budget",
+  "requires": [],
+  "limits": {
+    "timeLimitMs": 50,
+    "memLimitMb": 128
+  },
+  "expected": "",
+  "outcome": {
+    "ok": true,
+    "run": {
+      "exitCode": 0,
+      "runnerSignal": null,
+      "parentWallMs": 436,
+      "nodeTimerFired": false,
+      "stdout": "",
+      "stderr": "",
+      "truncated": false,
+      "cpuMs": 431,
+      "maxRssKb": 7776,
+      "jailWallMs": 434,
+      "nsjailExit": 0,
+      "nsjailSignal": 0
+    }
+  },
+  "result": {
+    "index": 0,
+    "exitCode": 0,
+    "passed": false,
+    "expected": "",
+    "received": "",
+    "stderr": "",
+    "stdout": "",
+    "timedOut": true,
+    "verdict": "TLE",
+    "timeMs": 434,
+    "cpuMs": 431,
+    "memKb": 7776
+  }
+}

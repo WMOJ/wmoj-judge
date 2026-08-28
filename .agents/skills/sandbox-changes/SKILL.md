@@ -47,7 +47,11 @@ WMOJ-JAILRUN v1 exit=<n> signal=<n> cpu_us=<n> maxrss_kb=<n> wall_us=<n>
 WMOJ-JAILRUN v1 error=<what> errno=<n>        # the runner itself failed
 ```
 
-matched by `REPORT_RE` / `REPORT_ERROR_RE` in `nsjail.ts`. **Change one, change the other.**
+matched by `REPORT_RE` / `REPORT_ERROR_RE` in `nsjail.ts`. **Change one, change the other.** The
+`recapture-measurements` CI job is what catches a change to either side that the other did not
+follow: any change under `Dockerfile`, `policy.kafel`, `src/sandbox/**`, `src/verdict/**` or
+`src/tools/**` re-captures `test/fixtures/measurements` on the x86_64 runner and diffs it against
+the committed set, nightly too (ADR 0002).
 
 Why out-of-jail rather than the alternatives, all of which were considered and rejected:
 
@@ -73,9 +77,10 @@ Two properties to keep in mind:
   real numbers.
 
 **`sandboxSelfCheck()`** in `nsjail.ts` is the loudness guarantee: it runs a shell loop that
-overspends a 50 ms budget and fails if `cpuMs === 0` or the ladder does not return `TO`. It also
-doubles as the nsjail/`policy.kafel` boot probe. `server.ts` should await it at boot and refuse to
-start on `ok: false`.
+overspends a 50 ms budget and fails unless a report arrived with a non-zero `cpuMs` at or above the
+budget. The other half — that the ladder turns that measurement into `TO` — is the `selfcheck`
+measurement fixture replayed by `test/unit/verdict.test.ts`. It also doubles as the
+nsjail/`policy.kafel` boot probe. `server.ts` awaits it at boot and refuses to start on `ok: false`.
 
 ## The four timers, and the order they must stay in
 
@@ -84,14 +89,14 @@ Four independent timers back that up, and the ordering is the whole design:
 
 | # | Timer | Value for `tl` ms | Set in |
 |---|---|---|---|
-| 1 | userland CPU check — **authoritative** | `cpuMs >= tl` | `classifyKill`, from the jailrun report |
+| 1 | userland CPU check — **authoritative** | `cpuMs >= tl` | the ladder in `src/verdict`, from the jailrun report |
 | 2 | kernel `RLIMIT_CPU` backstop | `ceil(tl/1000) + 1` s | `--rlimit_cpu` |
 | 3 | Node last-resort `SIGKILL` of the group | `tl + KILL_GRACE_MS` (5000 ms) | `killTimer`, `nsjail.ts` |
 | 4 | nsjail `--time_limit` wall backstop | `ceil((tl+5000)/1000) + 2` s | `--time_limit` |
 
 **1 < 2 < 3 < 4 must hold for every time limit.** Tighten any of them and the kernel kills the
 program with SIGXCPU before the userland check can classify it. That used to mean every TLE became a
-runtime error; `classifyKill` now also decodes nsjail's `128 + WTERMSIG` status and maps SIGXCPU to
+runtime error; the ladder now also decodes nsjail's `128 + WTERMSIG` status and maps SIGXCPU to
 `TO`, so the failure is contained — but the ordering is still what makes the verdict *precise*
 instead of rounded up to whole seconds.
 
@@ -126,7 +131,10 @@ blocking rests on seccomp alone and why the pool UID is only a concurrency gate.
 **4. No `--chroot`.** Chrooting into the workdir would hide `/usr/bin/python3`, `/usr/bin/g++`, and
 the shared libraries from the child, breaking `execve` on every run. `--rlimit_as` is always
 `memLimitMb`; there is no per-caller override, so it cannot drift from the enforced memory cap and
-silently disable MLE rule 3. `gid` is passed by every caller and never read.
+silently disable the refused-allocation MLE rule. `SandboxOpts.label` names the call site
+(`submit:case3`, `checker:case3`, `generator`, `liveness:launch`, `liveness:measure`,
+`capture:<name>`) so a sandbox log line can be tied back to the work that produced it; the `uid`/`gid`
+fields it replaced were never read.
 
 The rlimits, all in `--rlimit_*` form:
 
@@ -181,7 +189,7 @@ Nothing else bounds them — `requestCaps` bounds the *request*, `--rlimit_as` b
 rather than pipe throughput, and `--rlimit_fsize` never applies to pipes — so `for(;;) puts("x")`
 used to push hundreds of MB into the Node heap of a 512 MB container. The 1 MiB stdout cap sits just
 above `requestCaps`' 1,000,000-byte per-case expected-output cap, so a truncated `/submit` run could
-not have been `AC` anyway; `SandboxResult.truncated` says it happened.
+not have been `AC` anyway; `RunMeasurement.truncated` says it happened.
 
 Two deliberate choices here. The child is **not** killed on overflow — we keep draining and
 discarding, so an infinite print loop stays CPU-bound and reaches its own `RLIMIT_CPU` and a real
@@ -193,14 +201,15 @@ U+0000 is stripped to U+FFFD on the way out. It is valid UTF-8 so it survives `t
 and `wmoj-app` inserts these strings into a PostgreSQL `jsonb` column that cannot represent it — a
 single `putchar(0)` produced a correct 200 whose row was then silently never persisted.
 
-## `sandboxError`: a judge fault is never a student's verdict
+## `RunOutcome.ok === false`: a judge fault is never a student's verdict
 
-`SandboxResult.sandboxError` is set when the judge's own machinery failed and **nothing of the
-user's ran or can be graded**: the runner or nsjail could not be spawned, the runner reported its own
-failure, no resource report arrived on a run we did not force-kill, or nsjail exited 255/1 with an
-`[F]` fatal line on fd 3 and empty stdout. Callers must throw on it so the route's `catch` returns
-`500 {error}` — the documented "the judge is wrong" channel. Do **not** reuse `IE`; it is
-checker-only.
+`runSandboxed` resolves a `RunOutcome`: `{ok: true, run: RunMeasurement}` or
+`{ok: false, sandboxError}`. The second arm is the judge's own machinery failing, with **nothing of
+the user's run or gradeable**: the runner or nsjail could not be spawned, the runner reported its
+own failure, no resource report arrived on a run we did not force-kill, or nsjail exited 255/1 with
+an `[F]` fatal line on fd 3 and empty stdout. A caller has to look at `ok` before it can reach the
+measurement, and every caller throws on `ok: false` so the route's `catch` returns `500 {error}` —
+the documented "the judge is wrong" channel. Do **not** reuse `IE`; it is checker-only.
 
 The failure it exists for is live, not hypothetical: build the image for arm64 and `policy.kafel`
 (amd64 syscall table) fails to compile, nsjail exits 255 on every spawn, and **every test case of
@@ -265,7 +274,7 @@ The policy targets the **amd64** syscall table. That is why the Dockerfile pins 
 - **nsjail is pinned to tag 3.3**, built from source in stage 1, and `wmoj-jailrun` is built beside
   it from the heredoc in the same stage and copied to the same directory. Bumping the nsjail pin no
   longer risks silent zero resource numbers — those come from `wait4()` now — but it can still change
-  the exit-status shape `classifyKill` decodes. **If you bump it, verify a known-TLE and a known-MLE
+  the exit-status shape `decodeJailExit` (`src/sandbox/exitStatus.ts`) decodes. **If you bump it, verify a known-TLE and a known-MLE
   submission by hand against the built image.**
 
 ## Known weaknesses — do not make these worse

@@ -1,0 +1,42 @@
+{
+  "name": "sleepy-finished",
+  "intended": "AC",
+  "note": "ladder step 3 before step 4 — sleeps 2s against a 500ms limit and still passes",
+  "requires": [],
+  "limits": {
+    "timeLimitMs": 500,
+    "memLimitMb": 256
+  },
+  "expected": "done\n",
+  "outcome": {
+    "ok": true,
+    "run": {
+      "exitCode": 0,
+      "runnerSignal": null,
+      "parentWallMs": 2008,
+      "nodeTimerFired": false,
+      "stdout": "done\n",
+      "stderr": "",
+      "truncated": false,
+      "cpuMs": 6,
+      "maxRssKb": 7612,
+      "jailWallMs": 2006,
+      "nsjailExit": 0,
+      "nsjailSignal": 0
+    }
+  },
+  "result": {
+    "index": 0,
+    "exitCode": 0,
+    "passed": true,
+    "expected": "done\n",
+    "received": "done\n",
+    "stderr": "",
+    "stdout": "done\n",
+    "timedOut": false,
+    "verdict": "AC",
+    "timeMs": 2006,
+    "cpuMs": 6,
+    "memKb": 7612
+  }
+}

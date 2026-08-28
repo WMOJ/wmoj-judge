@@ -193,11 +193,10 @@ generateTestsRouter.post("/", async (req: Request, res: Response) => {
     }
     if (isRootNode) await fs.chown(outPath, uid, uid).catch(() => {});
 
-    const sandboxRes = await runSandboxed({
+    const outcome = await runSandboxed({
       argv: ["./gen.out"],
       cwd: workDir,
-      uid,
-      gid: uid,
+      label: "generator",
       timeLimitMs: GENERATOR_TIME_LIMIT_MS,
       memLimitMb: GENERATOR_MEM_LIMIT_MB,
       stdin: "",
@@ -216,24 +215,43 @@ generateTestsRouter.post("/", async (req: Request, res: Response) => {
       maxStderrBytes: GENERATOR_MAX_OUTPUT_BYTES,
     });
 
-    if (sandboxRes.sandboxError !== undefined) {
+    if (!outcome.ok) {
       // Nothing of the generator's code ran — this is a judge fault, not a
       // problem with the admin's source, so it must not surface as a 400
       // blaming the generator.
-      throw new Error(`sandbox failure: ${sandboxRes.sandboxError}`);
+      throw new Error(`sandbox failure: ${outcome.sandboxError}`);
     }
+    const run = outcome.run;
 
-    if (sandboxRes.exitCode !== 0 || sandboxRes.killedBy !== null) {
+    // "Did the generator finish?", spelled from raw facts rather than
+    // from a kill class. The verdict module's ladder is about grading a
+    // SUBMISSION against a problem's limits; this route has neither, and
+    // asking it would import a threshold that means nothing here. A
+    // generator either exited 0 under its own power or it did not.
+    if (run.exitCode !== 0 || run.runnerSignal !== null || run.nodeTimerFired) {
+      // CONTRACT NOTE. This text changed with the verdict refactor: it was
+      // `Generator exited with code N (TO|SIG|ok)`, where the parenthesis
+      // was the sandbox's kill class, and it is now the code plus a plain
+      // clause for each thing that could have ended the run. `wmoj-app`
+      // displays this string verbatim to an admin and does not parse it,
+      // so the change is cosmetic there — but it IS the response body of a
+      // documented 400, so it is pinned by a golden transcript and must
+      // not drift again without saying so here.
+      const killNote = run.nodeTimerFired
+        ? " (killed by the judge after the time limit)"
+        : run.runnerSignal !== null
+          ? ` (signal ${run.runnerSignal})`
+          : "";
       res.status(400).json({
-        error: `Generator exited with code ${sandboxRes.exitCode} (${sandboxRes.killedBy ?? "ok"})`,
-        inputJson: sandboxRes.stdout,
-        outputJson: sandboxRes.stderr,
+        error: `Generator exited with code ${run.exitCode}${killNote}`,
+        inputJson: run.stdout,
+        outputJson: run.stderr,
       });
       return;
     }
 
-    const inputRaw = sandboxRes.stdout;
-    const outputRaw = sandboxRes.stderr;
+    const inputRaw = run.stdout;
+    const outputRaw = run.stderr;
 
     let inputArr: unknown;
     let outputArr: unknown;

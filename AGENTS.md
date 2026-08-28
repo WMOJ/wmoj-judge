@@ -49,7 +49,7 @@ Trigger-scoped detail lives in `.agents/skills/` (`.claude` symlinks to it). Loa
 skill *before* touching the area; each holds failure modes this file has no room for.
 `sandbox-changes` (`src/sandbox/**`, `policy.kafel`, `Dockerfile`) · `custom-checkers`
 (`src/checker/`, the `checker` field) · `add-language` (a language or a compiler flag) ·
-`verdicts-and-comparison` (`deriveVerdict`, the MLE rules, `src/compare/`) · `judge-app-contract`
+`verdicts-and-comparison` (`gradeCase`, the MLE rules, `src/compare/`) · `judge-app-contract`
 (any request/response field, env-var name, or verdict string) · `run-judge-locally` (building,
 booting or smoke-testing the container, and pairing it with a local `wmoj-app`).
 
@@ -130,16 +130,16 @@ uts, cgroup), chroot, `--user`/`--group`, cgroups.
 
 ## Verdicts
 
-`Verdict = AC | WA | TLE | MLE | RE | CE | IE`. **The order of `deriveVerdict`'s checks is
-load-bearing: TLE → MLE → RE → IE → WA/AC**, with MLE tested *before* the `exitCode !== 0` branch
-(the rationale is a 45-line comment at `submit.ts:181-226`, and in `verdicts-and-comparison`).
+`Verdict = AC | WA | TLE | MLE | RE | CE | IE`. **`gradeCase` in `src/verdict` is the only place a
+verdict is decided; the sandbox reports measurements and nothing else.** Its TLE → MLE → RE → IE →
+WA/AC order and the kill ladder are internals guarded by `test/unit/verdict.test.ts` and the fixtures.
 
 - `IE` is produced **only** by a custom checker that could not answer — including one that crashed,
   tripped seccomp, or could not be exec'd. Never let that reach a student as `WA`.
 - **`CE` is declared but never produced** — compile failures surface via
   `compileError`/`checkerError`, and `wmoj-app` synthesizes its own `CE`.
-- A case passes only if `exitCode === 0 && killedBy === null` **and** the checker accepted (or, with
-  no checker, `compare(...)` matched) — correct output with a non-zero exit fails.
+- A case passes only if the run finished cleanly (exit 0, no kill class) **and** the checker accepted
+  (or, with no checker, `compare(...)` matched) — correct output with a non-zero exit fails.
 - **No early exit** — every case runs after a failure. An `IE` case counts as failed in `summary`.
 - Default comparator `trim-trailing`. **Comparators must stay linear**: the trailing-whitespace regex
   was quadratic, and one ordinary `printf("%1000000d")` blocked the event loop for ~26 minutes.

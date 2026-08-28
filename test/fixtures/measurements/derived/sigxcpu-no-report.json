@@ -1,0 +1,39 @@
+{
+  "name": "sigxcpu-no-report",
+  "intended": "TLE",
+  "note": "ladder step 6 with nothing else to go on — SIGXCPU decoded from the exit status alone",
+  "requires": [],
+  "derivedFrom": "rlimit-cpu-kill",
+  "transformation": "exitCode: 152 (128+SIGXCPU); the whole resource report removed; parentWallMs: 12 so no earlier step can decide it",
+  "limits": {
+    "timeLimitMs": 500,
+    "memLimitMb": 256
+  },
+  "expected": "",
+  "outcome": {
+    "ok": true,
+    "run": {
+      "exitCode": 152,
+      "runnerSignal": null,
+      "parentWallMs": 12,
+      "nodeTimerFired": false,
+      "stdout": "",
+      "stderr": "",
+      "truncated": false
+    }
+  },
+  "result": {
+    "index": 0,
+    "exitCode": 152,
+    "passed": false,
+    "expected": "",
+    "received": "",
+    "stderr": "",
+    "stdout": "",
+    "timedOut": true,
+    "verdict": "TLE",
+    "timeMs": 12,
+    "cpuMs": 0,
+    "memKb": 0
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "name": "segfault",
+  "intended": "RE",
+  "note": "ladder step 6 — SIGSEGV as nsjail's 128+11, low RSS and no allocation text",
+  "requires": [
+    "native"
+  ],
+  "limits": {
+    "timeLimitMs": 2000,
+    "memLimitMb": 256
+  },
+  "expected": "",
+  "outcome": {
+    "ok": true,
+    "run": {
+      "exitCode": 139,
+      "runnerSignal": null,
+      "parentWallMs": 106,
+      "nodeTimerFired": false,
+      "stdout": "",
+      "stderr": "",
+      "truncated": false,
+      "cpuMs": 6,
+      "maxRssKb": 7544,
+      "jailWallMs": 103,
+      "nsjailExit": 139,
+      "nsjailSignal": 0
+    }
+  },
+  "result": {
+    "index": 0,
+    "exitCode": 139,
+    "passed": false,
+    "expected": "",
+    "received": "",
+    "stderr": "",
+    "stdout": "",
+    "timedOut": false,
+    "verdict": "RE",
+    "timeMs": 103,
+    "cpuMs": 6,
+    "memKb": 7544
+  }
+}

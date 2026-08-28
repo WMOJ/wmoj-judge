@@ -6,14 +6,13 @@ import type {
   TestResult,
   CompareMode,
   Language,
-  Verdict,
-  SandboxResult,
 } from "../types";
 import { config } from "../config";
 import { submitSemaphore } from "../queue/globalSemaphore";
 import { createPool } from "../queue/workerPool";
 import { compileCache, cacheKey } from "../cache/compileCache";
-import { runSandboxed, MEM_LIMIT_RSS_RATIO } from "../sandbox/nsjail";
+import { runSandboxed } from "../sandbox/nsjail";
+import { gradeCase, type CaseLimits, type Judge } from "../verdict";
 import { acquireUid, releaseUid } from "../queue/uidPoolSingleton";
 import { createWorkdir, cleanupWorkdir, isRootNode } from "../util/workdir";
 import { executorFor } from "../executors";
@@ -194,8 +193,8 @@ function compileArgvFor(language: Language): readonly string[] {
  * every request either client has ever made, and every PyPy submission
  * ran at the problem's cap. A PyPy solution that fits comfortably in
  * 256 MB of *user* data would hit `--rlimit_as 256`, raise `MemoryError`,
- * match `ALLOCATION_FAILURE_RE`, and be graded `MLE` while the
- * equivalent CPython submission passed.
+ * match the verdict module's allocation-failure signatures, and be graded
+ * `MLE` while the equivalent CPython submission passed.
  */
 function languageMemoryDefaultMb(language: Language): number | undefined {
   const spec = languagesJson[language] as { memoryLimitMb?: number };
@@ -207,157 +206,30 @@ function languageMemoryDefaultMb(language: Language): number | undefined {
  * actually back. A problem may legitimately DECLARE 1024 MB; on a
  * 512 MB box that limit could never be enforced — the container's OOM
  * killer would fire first and produce a confusing crash. Enforcing
- * `min(requested, HOST_MEMORY_CEILING_MB)` means the judge's own
- * accounting stays authoritative and the failure is a clean MLE.
+ * `min(requested, ceilingMb)` means the judge's own accounting stays
+ * authoritative and the failure is a clean MLE.
+ *
+ * The ceiling is a PARAMETER rather than a read of
+ * `config.HOST_MEMORY_CEILING_MB` so this is a pure function of its
+ * inputs and the one place the env is consulted is the route below.
+ * Clamping stays here, at the route: the verdict module is handed the
+ * already-enforced limits and never learns that a ceiling exists.
  *
  * The result is floored to a whole MB because that is what the sandbox
  * enforces (`Math.max(1, Math.floor(memLimitMb))` in `nsjail.ts`).
  * Without the floor a `memoryLimit` of 300.75 was advertised back as
  * `effectiveMemoryLimitMb: 300.75` — a field both `types.ts` and
  * `AGENTS.md` define as "the cap actually enforced" — while 300 MB was
- * applied, and MLE rule 2 computed its RSS threshold against a cap that
- * had never existed. `memoryLimit` is deliberately still accepted as any
+ * applied, and the RSS threshold was computed against a cap that had
+ * never existed. `memoryLimit` is deliberately still accepted as any
  * positive finite number: rounding it makes the two agree, and rejecting
  * it would be a contract change for a shape no client sends.
  */
-export function effectiveMemLimitMb(requestedMb: number): number {
-  return Math.max(
-    1,
-    Math.floor(Math.min(requestedMb, config.HOST_MEMORY_CEILING_MB)),
-  );
-}
-
-/**
- * Signatures a program emits when an allocation was REFUSED rather than
- * the process being killed. This is the common case on this host:
- * limits are enforced with `--rlimit_as`, which caps virtual address
- * space, so `malloc`/`new` return failure instead of the kernel killing
- * anything. The program then throws, aborts, and exits non-zero — which
- * looks exactly like a runtime error unless we read its stderr.
- *
- *   std::bad_alloc         uncaught C++ `new` failure
- *   bad_array_new_length   C++ `new T[n]` with an absurd n
- *   Cannot allocate memory strerror(ENOMEM), printed by many runtimes
- *   MemoryError            CPython / PyPy
- *   Killed                 an OOM-killer message that reached stderr
- */
-const ALLOCATION_FAILURE_RE =
-  /std::bad_alloc|bad_array_new_length|Cannot allocate memory|MemoryError|\bKilled\b/;
-
-/**
- * Decide whether a case blew its memory budget. True when ANY of:
- *
- *   1. the sandbox already classified the kill as OOM (nsjail reported a
- *      memory limit exceeded, or peak RSS reached the cap);
- *   2. peak RSS reached >=98% of the ENFORCED cap;
- *   3. the program exited non-zero and its stderr carries an
- *      allocation-failure signature (the RLIMIT_AS case, where RSS stays
- *      *below* the cap precisely because the allocation was refused).
- *
- * Rules 2 and 3 are gated on the run not having finished cleanly: a
- * program that exit(0)'d fit inside its budget by definition, however
- * close to the ceiling it got, and must never be downgraded from AC.
- * A plain SIGSEGV from a null-pointer bug has low RSS and no allocation
- * signature on stderr, so it stays RE.
- *
- * NOTE ON MATURITY: rules 1 and 2 read `sb.memKb`, which was `0` on
- * every single run for the entire life of the nsjail 3.3 pin — the old
- * code scraped it out of nsjail's log and nsjail 3.3 emits no such line.
- * 3,457 stored test cases carry `memKb: 0`, and no submission has ever
- * been graded `MLE` by either rule. They now measure real `ru_maxrss`
- * from the jail runner and will fire for the first time, so treat them
- * as unproven rather than battle-tested. Two consequences worth knowing:
- * `memKb` is the peak of the whole jail tree (nsjail's own few MB
- * included), so it can only ever over-report; and rule 2 duplicates
- * `classifyKill`'s own RSS step, which is why an over-cap run usually
- * arrives already carrying `killedBy === "OOM"`.
- */
-export function isMemoryLimitExceeded(
-  sb: SandboxResult,
-  enforcedMemLimitMb: number,
-): boolean {
-  if (sb.killedBy === "OOM") return true;
-  if (sb.exitCode === 0 && sb.killedBy === null) return false;
-
-  const limitKb = Math.floor(enforcedMemLimitMb * 1024);
-  if (limitKb > 0 && sb.memKb >= limitKb * MEM_LIMIT_RSS_RATIO) return true;
-
-  return ALLOCATION_FAILURE_RE.test(sb.stderr);
-}
-
-/**
- * Derive the competitive-programming verdict from a sandbox result plus
- * the compare()/checker outcome.
- *
- * Order is load-bearing: **TLE -> MLE -> RE -> IE -> WA/AC**. A memory
- * failure must be tested before the `exitCode !== 0` branch, or every
- * refused allocation is mislabelled `RE` — the bug this ordering exists
- * to prevent.
- *
- * `checkerFailed` is set when a custom checker could not answer for this
- * case (exit 3, or the checker itself crashed/timed out). That is a
- * problem-configuration fault, so it surfaces as `IE` — but only after
- * the program's own failures, which are more specific.
- */
-export function deriveVerdict(
-  sb: SandboxResult,
-  passed: boolean,
-  enforcedMemLimitMb: number,
-  checkerFailed = false,
-): Verdict {
-  if (sb.killedBy === "TO") return "TLE";
-  if (isMemoryLimitExceeded(sb, enforcedMemLimitMb)) return "MLE";
-  if (sb.exitCode !== 0 || sb.killedBy === "SIG") return "RE";
-  if (checkerFailed) return "IE";
-  return passed ? "AC" : "WA";
-}
-
-/**
- * Build the TestResult for one test case from the sandbox result.
- * Centralizes the "shape" of a result so it can't drift between cases.
- */
-function buildResult(
-  index: number,
-  expected: string,
-  sb: SandboxResult,
-  passed: boolean,
-  verdict: Verdict,
-  checkerMessage?: string,
-): TestResult {
-  const result: TestResult = {
-    index,
-    exitCode: sb.exitCode,
-    passed,
-    expected,
-    received: sb.stdout,
-    stderr: sb.stderr,
-    stdout: sb.stdout,
-    timedOut: sb.killedBy === "TO",
-    verdict,
-    timeMs: sb.timeMs,
-    cpuMs: sb.cpuMs,
-    memKb: sb.memKb,
-  };
-  // Both optional keys are omitted rather than set false/empty, so a
-  // response for an ordinary submission stays byte-identical to what it
-  // was before either field existed.
-  //
-  // `truncated` says the strings above are a PREFIX: the sandbox now
-  // drains-and-discards past 1 MiB of stdout / 64 KiB of stderr instead
-  // of accumulating an unbounded `for(;;) puts("x")` in the Node heap of
-  // a 512 MB container. Without this flag `received` would silently
-  // disagree with what the program actually printed and a `WA` would be
-  // unexplainable to the student. The cap sits above the largest
-  // expected output `requestCaps` accepts, so a truncated run could not
-  // have been AC anyway — the verdict itself is unaffected.
-  if (sb.truncated) {
-    result.truncated = true;
-  }
-  // Omitted when the checker said nothing (or never ran).
-  if (checkerMessage !== undefined && checkerMessage.length > 0) {
-    result.checkerMessage = checkerMessage;
-  }
-  return result;
+export function effectiveMemLimitMb(
+  requestedMb: number,
+  ceilingMb: number,
+): number {
+  return Math.max(1, Math.floor(Math.min(requestedMb, ceilingMb)));
 }
 
 /**
@@ -395,12 +267,13 @@ export const submitRouter: Router = Router();
  *  7. compile the custom checker once, if one was supplied
  *     (checker compile fail → HTTP 200 with checkerError)
  *  8. per-submission worker pool runs each test
- *  9. each test: nsjail → checker OR compare → verdict
+ *  9. each test: nsjail measures → `gradeCase` decides, calling the
+ *     checker or the comparator only if the program finished cleanly
  * 10. every case settles (none may still be running), then sort by
  *     index, summarize, cleanup, return 200.
  *
  * A judge-side sandbox failure at step 9 aborts the whole submission
- * with `500 {error}` rather than being graded — see the `sandboxError`
+ * with `500 {error}` rather than being graded — see the `ok: false`
  * handling inside the per-case task.
  */
 submitRouter.post("/", async (req: Request, res: Response) => {
@@ -433,7 +306,15 @@ submitRouter.post("/", async (req: Request, res: Response) => {
   const requestedMemLimitMb =
     Math.max(payload.memoryLimit ?? 0, languageMemoryDefaultMb(language) ?? 0) ||
     256;
-  const memLimitMb = effectiveMemLimitMb(requestedMemLimitMb);
+  const memLimitMb = effectiveMemLimitMb(
+    requestedMemLimitMb,
+    config.HOST_MEMORY_CEILING_MB,
+  );
+  // Built once, not per case: every case of a submission is graded
+  // against the same enforced budget, and `gradeCase` takes the limits as
+  // a parameter precisely so the clamping stays here, at the route, where
+  // `config` belongs.
+  const limits: CaseLimits = { timeLimitMs, memLimitMb };
 
   logger.info(
     {
@@ -555,11 +436,10 @@ submitRouter.post("/", async (req: Request, res: Response) => {
                 ? rawInput
                 : rawInput + "\n";
             const expected = payload.output[i] ?? "";
-            const sandboxRes = await runSandboxed({
+            const outcome = await runSandboxed({
               argv: runCmd.argv,
               cwd: workDir as string,
-              uid: uid as number,
-              gid: uid as number,
+              label: `submit:case${String(i)}`,
               timeLimitMs,
               memLimitMb,
               stdin,
@@ -580,75 +460,69 @@ submitRouter.post("/", async (req: Request, res: Response) => {
             // EVERY case of EVERY submission `RE` on a clean HTTP 200
             // while `/health` still reported `ok`. Deliberately not
             // `IE`: `IE` is documented as checker-only.
-            if (sandboxRes.sandboxError !== undefined) {
+            if (!outcome.ok) {
               throw new Error(
-                `sandbox failure on test case ${i}: ${sandboxRes.sandboxError}`,
+                `sandbox failure on test case ${i}: ${outcome.sandboxError}`,
               );
             }
 
-            // A case can only pass if the program itself finished cleanly.
-            // Unchanged from before checkers existed — and it means a
-            // crashed/TLE'd run never invokes the checker at all.
-            const ranCleanly =
-              sandboxRes.exitCode === 0 && sandboxRes.killedBy === null;
-
-            let passed = false;
-            let checkerFailed = false;
-            let checkerMessage: string | undefined;
-
-            if (ranCleanly) {
-              if (checkerSource !== undefined) {
-                // Checker REPLACES compareMode — the string comparison is
-                // not run at all when a checker is supplied.
-                const verdictFromChecker = await runChecker({
-                  workDir: workDir as string,
-                  uid: uid as number,
-                  index: i,
-                  input: stdin,
-                  expected,
-                  received: sandboxRes.stdout,
-                });
-                // Same rule as above, one layer down: the checker's own
-                // sandbox failing is the judge breaking, not the problem
-                // being misconfigured, so it must not become `IE` either.
-                if (verdictFromChecker.sandboxError !== undefined) {
-                  throw new Error(
-                    `checker sandbox failure on test case ${i}: ${verdictFromChecker.sandboxError}`,
-                  );
-                }
-                passed = verdictFromChecker.outcome === "accepted";
-                checkerFailed = verdictFromChecker.outcome === "internal-error";
-                checkerMessage = verdictFromChecker.message;
-                if (checkerFailed) {
-                  logger.error(
-                    {
+            // How this case's output is judged. `gradeCase` calls it ONLY
+            // when the program itself finished cleanly, which is what
+            // keeps a crashed or timed-out run from ever reaching the
+            // comparator or the checker — unchanged from before checkers
+            // existed.
+            const judge: Judge =
+              checkerSource === undefined
+                ? // No checker: the byte comparison the request selected.
+                  async (received) => ({
+                    passed: compare(compareMode, expected, received),
+                  })
+                : // A checker REPLACES compareMode — the string
+                  // comparison is not run at all when one is supplied.
+                  async (received) => {
+                    const checkerRun = await runChecker({
+                      workDir: workDir as string,
                       index: i,
-                      exitCode: verdictFromChecker.exitCode,
-                      message: checkerMessage,
-                    },
-                    "submit: checker reported an internal error",
-                  );
-                }
-              } else {
-                passed = compare(compareMode, expected, sandboxRes.stdout);
-              }
-            }
+                      input: stdin,
+                      expected,
+                      received,
+                    });
+                    // Same rule as above, one layer down: the checker's
+                    // own sandbox failing is the judge breaking, not the
+                    // problem being misconfigured, so it must not become
+                    // `IE` either. Throwing here rejects `gradeCase` and
+                    // lands in the task's `catch` below.
+                    if (!checkerRun.ok) {
+                      throw new Error(
+                        `checker sandbox failure on test case ${i}: ${checkerRun.sandboxError}`,
+                      );
+                    }
+                    const checkerVerdict = checkerRun.verdict;
+                    if (checkerVerdict.outcome === "internal-error") {
+                      logger.error(
+                        {
+                          index: i,
+                          exitCode: checkerVerdict.exitCode,
+                          message: checkerVerdict.message,
+                        },
+                        "submit: checker reported an internal error",
+                      );
+                      return {
+                        checkerFailed: true,
+                        checkerMessage: checkerVerdict.message,
+                      };
+                    }
+                    return {
+                      passed: checkerVerdict.outcome === "accepted",
+                      checkerMessage: checkerVerdict.message,
+                    };
+                  };
 
-            const verdict = deriveVerdict(
-              sandboxRes,
-              passed,
-              memLimitMb,
-              checkerFailed,
-            );
             return {
               ok: true,
-              result: buildResult(
-                i,
-                expected,
-                sandboxRes,
-                passed,
-                verdict,
-                checkerMessage,
+              result: await gradeCase(
+                { index: i, expected, run: outcome.run, limits },
+                judge,
               ),
             };
           } catch (err) {

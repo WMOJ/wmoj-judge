@@ -1,0 +1,37 @@
+{
+  "name": "node-timer-kill",
+  "intended": "TLE",
+  "note": "ladder step 1 — the judge's last-resort SIGKILL timer, no report at all",
+  "requires": [],
+  "limits": {
+    "timeLimitMs": 500,
+    "memLimitMb": 256
+  },
+  "expected": "",
+  "outcome": {
+    "ok": true,
+    "run": {
+      "exitCode": null,
+      "runnerSignal": "SIGKILL",
+      "parentWallMs": 5503,
+      "nodeTimerFired": true,
+      "stdout": "",
+      "stderr": "",
+      "truncated": false
+    }
+  },
+  "result": {
+    "index": 0,
+    "exitCode": null,
+    "passed": false,
+    "expected": "",
+    "received": "",
+    "stderr": "",
+    "stdout": "",
+    "timedOut": true,
+    "verdict": "TLE",
+    "timeMs": 5503,
+    "cpuMs": 0,
+    "memKb": 0
+  }
+}

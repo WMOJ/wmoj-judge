@@ -1,0 +1,44 @@
+{
+  "name": "sigsys-denied",
+  "intended": "RE",
+  "note": "ladder step 6 — SIGSYS (128+31), unreachable on this policy because its DEFAULT is ERRNO, not KILL",
+  "requires": [],
+  "derivedFrom": "segfault",
+  "transformation": "exitCode: 159",
+  "limits": {
+    "timeLimitMs": 2000,
+    "memLimitMb": 256
+  },
+  "expected": "",
+  "outcome": {
+    "ok": true,
+    "run": {
+      "exitCode": 159,
+      "runnerSignal": null,
+      "parentWallMs": 106,
+      "nodeTimerFired": false,
+      "stdout": "",
+      "stderr": "",
+      "truncated": false,
+      "cpuMs": 6,
+      "maxRssKb": 7544,
+      "jailWallMs": 103,
+      "nsjailExit": 139,
+      "nsjailSignal": 0
+    }
+  },
+  "result": {
+    "index": 0,
+    "exitCode": 159,
+    "passed": false,
+    "expected": "",
+    "received": "",
+    "stderr": "",
+    "stdout": "",
+    "timedOut": false,
+    "verdict": "RE",
+    "timeMs": 103,
+    "cpuMs": 6,
+    "memKb": 7544
+  }
+}

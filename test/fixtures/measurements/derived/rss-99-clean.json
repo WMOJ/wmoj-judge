@@ -1,0 +1,44 @@
+{
+  "name": "rss-99-clean",
+  "intended": "AC",
+  "note": "ladder step 5 after step 3 — 99% of the cap on a clean exit is still AC",
+  "requires": [],
+  "derivedFrom": "clean-exit",
+  "transformation": "maxRssKb: floor(0.99 * memLimitMb * 1024)",
+  "limits": {
+    "timeLimitMs": 2000,
+    "memLimitMb": 256
+  },
+  "expected": "42\n",
+  "outcome": {
+    "ok": true,
+    "run": {
+      "exitCode": 0,
+      "runnerSignal": null,
+      "parentWallMs": 8,
+      "nodeTimerFired": false,
+      "stdout": "42\n",
+      "stderr": "",
+      "truncated": false,
+      "cpuMs": 6,
+      "maxRssKb": 259522,
+      "jailWallMs": 6,
+      "nsjailExit": 0,
+      "nsjailSignal": 0
+    }
+  },
+  "result": {
+    "index": 0,
+    "exitCode": 0,
+    "passed": true,
+    "expected": "42\n",
+    "received": "42\n",
+    "stderr": "",
+    "stdout": "42\n",
+    "timedOut": false,
+    "verdict": "AC",
+    "timeMs": 6,
+    "cpuMs": 6,
+    "memKb": 259522
+  }
+}

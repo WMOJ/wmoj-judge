@@ -61,7 +61,8 @@ escape the judge — with its own generous limits: **10 s CPU, 256 MB**. They ex
 checker cannot wedge the judge, not to constrain it.
 
 **5. Only when the contestant's program finished cleanly.** A TLE, MLE, or RE case never reaches the
-checker at all, because a case can only pass when `exitCode === 0 && killedBy === null`.
+checker at all: `gradeCase` (`src/verdict`) invokes the judge callback only when the run finished
+cleanly — exit 0 and no kill class.
 
 ## Exit codes
 
@@ -84,25 +85,26 @@ not blamed on the student. An `IE` case still counts as failed in `summary`.
 **The `>= 128` row is load-bearing and easy to delete by accident.** nsjail runs in `--mode o`, where
 its own exit status *is* the child's fate: `128 + WTERMSIG` when a signal killed it, and **255** when
 it could not `execve` the checker at all. nsjail itself exits *normally* in both cases, so Node's
-`signal` is `null` and `killedBy` can be `null` too — which is why the old
-`killedBy !== null || exitCode === null` test missed every checker that segfaulted (139), aborted
-(134), tripped seccomp (159), or had been deleted by the contestant (255). All of them fell through
-to `default: rejected`, so the whole problem was graded **`WA`** — with no `IE` anywhere and, when
-the checker's stderr was empty, no `checkerMessage` either. The problem looked healthy; the student
-looked wrong. `classifyKill` decodes `128 + n` now as well, so most of these arrive as
-`killedBy === "SIG"`; `classifyCheckerResult` keeps its own check as belt-and-braces, because the
-cost of being wrong here is invisible mass-misgrading. The testlib convention only uses 0–7, so
-`>= 128` can never collide with a code a checker deliberately chose.
+`runnerSignal` is `null` — which is why an older test on the runner's signal alone missed every
+checker that segfaulted (139), aborted (134), tripped seccomp (159), or had been deleted by the
+contestant (255). All of them fell through to `default: rejected`, so the whole problem was graded
+**`WA`** — with no `IE` anywhere and, when the checker's stderr was empty, no `checkerMessage`
+either. The problem looked healthy; the student looked wrong. `decodeJailExit`
+(`src/sandbox/exitStatus.ts`) is now the one decoder of that encoding, shared with the verdict
+ladder; `classifyCheckerResult` adds a *policy* on top of it — an `exited` code at or above 128 is
+`internal-error` too, because those codes are reserved for the encoding and a checker cannot
+legitimately choose one (the testlib convention only uses 0–7). The cost of being wrong here is
+invisible mass-misgrading.
 
 **A harness failure is `IE` too.** `runChecker` catches everything — a scratch-file `ENOSPC`, the
 `X_OK` check failing — and returns `internal-error` with `exitCode: null` and a
 `checker harness error: …` message, which is exactly what "the checker could not answer" means. One
 bad case must not reject and take every already-computed verdict down with it.
 
-**The one exception is a `sandboxError`**, returned on `CheckerVerdict.sandboxError` alongside
-`outcome: "internal-error"` as a safe default for callers that ignore it. That is the *judge's*
-sandbox failing, not the problem's configuration, so `submit.ts` throws on it and the route returns
-`500 {error}`. Never map a `sandboxError` to `IE` — see `verdicts-and-comparison`.
+**The one exception is a judge fault.** `runChecker` resolves a `CheckerRun`:
+`{ok: true, verdict}` or `{ok: false, sandboxError}`. The second arm is the *judge's* sandbox
+failing, not the problem's configuration, so `submit.ts` throws on it and the route returns
+`500 {error}`. Never map it to `IE` — see `verdicts-and-comparison`.
 
 **The checker's stdout is completely ignored.** This is an exit-code-only protocol, not the full
 testlib result-file protocol. Do not write a result file and do not expect one to be read.

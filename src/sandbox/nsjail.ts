@@ -1,7 +1,7 @@
 import { spawn } from "child_process";
 import * as os from "os";
 import * as path from "path";
-import type { SandboxOpts, SandboxResult } from "../types";
+import type { RunMeasurement, RunOutcome, SandboxOpts } from "../types";
 import { buildChildEnv } from "./minimalEnv";
 import { logger } from "../util/logger";
 import { config } from "../config";
@@ -78,24 +78,12 @@ const MAX_NSJAIL_LOG_BYTES = 256 * 1024;
 const MAX_REPORT_BYTES = 4096;
 
 /**
- * Fraction of the memory cap at which peak RSS counts as "hit the
- * limit". Shared with `submit.ts`'s MLE classification so the sandbox
- * and the verdict layer agree on the threshold. See the comment at the
- * RSS check in `classifyKill` for why it isn't 1.0.
- */
-export const MEM_LIMIT_RSS_RATIO = 0.98;
-
-/**
  * The fd `wmoj-jailrun` writes its resource report to. Slot 4 of the
  * stdio array below; slot 3 is nsjail's own `--log_fd`. The runner sets
  * FD_CLOEXEC on it before forking, so nsjail -- and therefore the jailed
  * program -- never inherits it and cannot forge or truncate the report.
  */
 const REPORT_FD = 4;
-
-/** Signal numbers we decode out of nsjail's `128 + WTERMSIG` status. */
-const SIGKILL_NUM = 9;
-const SIGXCPU_NUM = 24;
 
 /**
  * The resource report `wmoj-jailrun` writes to `REPORT_FD`.
@@ -105,8 +93,8 @@ const SIGXCPU_NUM = 24;
  * log line it emits at runtime contains a CPU time, a wall time or a
  * maxrss. The judge used to scrape six regexes out of that log, all of
  * which matched nothing, so `cpuMs` and `memKb` were `0` on every run.
- * That silently disabled the authoritative TLE gate, both RSS-based MLE
- * rules, and the setup-overhead telemetry added to catch exactly this
+ * That silently disabled the authoritative TLE gate, every RSS-based MLE
+ * rule, and the setup-overhead telemetry added to catch exactly this
  * class of regression. There was no error and no log line -- just a
  * judge that had stopped reporting TLE and MLE.
  *
@@ -179,8 +167,8 @@ function clampMs(ms: number): number {
  * Convert a submission's time budget in ms to the RLIMIT_CPU value
  * nsjail wants in whole seconds. +1s of slack so short (<1s) limits
  * don't underflow and so RLIMIT_CPU triggers strictly after the
- * userland CPU check in classifyKill -- RLIMIT_CPU is a kernel-level
- * backstop against runaway CPU, while `report.cpuMs >= timeLimitMs`
+ * userland CPU check in `src/verdict`'s kill ladder -- RLIMIT_CPU is a
+ * kernel-level backstop against runaway CPU, while `cpuMs >= timeLimitMs`
  * is the authoritative TLE gate with sub-millisecond precision.
  */
 function cpuLimitSecFor(timeLimitMs: number): number {
@@ -215,8 +203,11 @@ function capOf(requested: number | undefined, fallback: number): number {
  * `RE`, and would turn a program that merely prints too much into `RE`
  * where `WA` is the truth. Memory -- the actual defect -- is bounded
  * either way, and RLIMIT_CPU still bounds how long the drain runs.
+ *
+ * @internal Exported as a type only, for `interpretRun`'s tests, which
+ * build these records by hand. It adds nothing to the runtime exports.
  */
-interface CappedStream {
+export interface CappedStream {
   chunks: Buffer[];
   bytes: number;
   truncated: boolean;
@@ -299,8 +290,11 @@ function groupInt(m: RegExpExecArray, i: number): number {
  * written at all -- the caller decides whether that is expected, and it
  * is exactly when we force-killed the group, because the runner is in
  * that group and dies with it.
+ *
+ * @internal Exported for `test/unit/sandbox/interpretRun.test.ts` only.
+ * Nothing outside this module and its tests may call it.
  */
-function parseJailRunReport(
+export function parseJailRunReport(
   text: string,
 ): { ok: true; value: JailRunReport } | { ok: false; error: string } | undefined {
   const failed = REPORT_ERROR_RE.exec(text);
@@ -341,6 +335,198 @@ function looksLikeNsjailSetupFailure(exitCode: number | null, log: string): bool
 }
 
 /**
+ * Everything `runSandboxed` knows once the child has settled, before any
+ * of it has been interpreted. Nothing outside this module builds one:
+ * `interpretRun` is a pure function of exactly this record, which is what
+ * makes the five judge-fault branches and the report parsing testable
+ * without spawning nsjail.
+ *
+ * The four streams arrive as the capped accumulators rather than as text
+ * so that decoding -- the NUL substitution, the partial-sequence repair
+ * at a truncation boundary -- stays on this side of the seam and is
+ * exercised by the same tests.
+ *
+ * @internal Exported as a type only. Not a runtime export.
+ */
+export interface RawRun {
+  /** The runner's exit code, mirroring nsjail's. */
+  code: number | null;
+  /** The signal that killed the RUNNER, from Node. */
+  signal: NodeJS.Signals | null;
+  /** Node could not spawn the runner at all. */
+  spawnError: string | null;
+  /** The absolute deadline won the race and we force-killed the group. */
+  deadlineExceeded: boolean;
+  out: CappedStream;
+  err: CappedStream;
+  log: CappedStream;
+  report: CappedStream;
+  /** Parent-measured wall, spawn to settle. */
+  wallMs: number;
+  /** WE destroyed the process group (kill timer or absolute deadline). */
+  forcedKill: boolean;
+  /** Specifically the last-resort SIGKILL timer, not the deadline. */
+  killedByTimer: boolean;
+  /** `SandboxOpts.label` — diagnostics only. */
+  label: string;
+  argv: readonly string[];
+  cwd: string;
+  timeLimitMs: number;
+}
+
+/**
+ * Turn one settled run into either a measurement or a judge fault.
+ *
+ * The five fault branches below are the whole of the "the judge is
+ * wrong" channel, and their ORDER matters: a spawn failure means nothing
+ * of the user's ever ran, and must not be re-described by a later branch
+ * as a missing report. Each of them ends the case with an HTTP 500 at the
+ * route, never with a verdict.
+ *
+ * Everything that is not a fault is a `RunMeasurement` carrying raw
+ * numbers and nothing else. The optional report fields are OMITTED, not
+ * zeroed, when no report survived -- which happens exactly when we
+ * force-killed the group, because the runner is in that group and dies
+ * with it. `cpuMs: 0` and "we never measured cpuMs" are different facts,
+ * and collapsing them is precisely how the nsjail-3.3 accounting
+ * regression stayed invisible for the life of the pin.
+ */
+export function interpretRun(raw: RawRun): RunOutcome {
+  const stdout = decodeChildOutput(raw.out);
+  // The child's stderr is byte-clean: nsjail's logger writes to fd 3
+  // (captured separately into `nsjailLog` below) and the runner's
+  // report to fd 4, so nothing here came from either. Forward it to
+  // the caller as-is -- no filtering, no normalisation beyond the NUL
+  // substitution in decodeChildOutput. This is what makes
+  // /generate-tests parseable and what makes /submit's
+  // TestResult.stderr show the user's real stderr.
+  const stderr = decodeChildOutput(raw.err);
+  // nsjail's fd-3 log is DIAGNOSTIC ONLY -- no verdict is derived from
+  // its text. That matters because it is not settled whether the jailed
+  // process can write to fd 3 itself; while the six log regexes existed,
+  // a submission that could write there could forge its own CPU and
+  // memory numbers. It can now at worst pollute a log line and, by
+  // forging a `[F]` fatal prefix on an exit-255 run with no stdout, turn
+  // its OWN submission into a judge-fault 500.
+  const nsjailLog = Buffer.concat(raw.log.chunks).toString("utf8");
+  const parsed = parseJailRunReport(
+    Buffer.concat(raw.report.chunks).toString("utf8"),
+  );
+
+  let sandboxError: string | undefined;
+  if (raw.spawnError !== null) {
+    // code === null here means nothing of the user's ever ran.
+    sandboxError = `sandbox could not be started: ${raw.spawnError}`;
+  } else if (raw.deadlineExceeded) {
+    sandboxError = "sandbox exceeded its absolute deadline and was force-killed";
+  } else if (parsed !== undefined && !parsed.ok) {
+    sandboxError = parsed.error;
+  } else if (parsed === undefined && !raw.forcedKill) {
+    sandboxError =
+      "sandbox produced no resource report -- the jail runner did not complete";
+  } else if (
+    looksLikeNsjailSetupFailure(raw.code, nsjailLog) &&
+    stdout.length === 0
+  ) {
+    sandboxError = `nsjail failed to start the jail (exit ${String(raw.code)})`;
+  }
+
+  const measured = parsed !== undefined && parsed.ok ? parsed.value : undefined;
+  const truncated = raw.out.truncated || raw.err.truncated;
+
+  // Setup-overhead telemetry. `parentWallMs` includes Node's spawn,
+  // V8 GC pauses and event-loop jitter; `jailWallMs` is the runner's
+  // own fork()->wait4() measurement of nsjail. The delta is the
+  // judge's per-spawn overhead -- useful for verifying that TLE is no
+  // longer sensitive to it, and for alerting when it regresses. This
+  // number was itself always 0 while resource accounting was broken,
+  // which is why the regression it exists to catch went unnoticed.
+  logger.debug(
+    {
+      label: raw.label,
+      cpuMs: measured?.cpuMs,
+      memKb: measured?.maxRssKb,
+      jailWallMs: measured?.wallMs,
+      parentWallMs: raw.wallMs,
+      setupOverheadMs: Math.max(0, raw.wallMs - (measured?.wallMs ?? raw.wallMs)),
+      truncated,
+      timeLimitMs: raw.timeLimitMs,
+    },
+    "sandbox: timing",
+  );
+
+  // Diagnostic logging. A student's program crashing is ordinary and
+  // logs at debug; only a JUDGE-side fault logs at warn. The old
+  // condition fired at warn on every single RE case -- up to 200 per
+  // submission, 6 KB of attacker-chosen text each -- on a metered
+  // free-tier instance, and its second disjunct (`code >= 128`) was a
+  // strict subset of its first (`code !== 0`) and never added anything.
+  //
+  // `label` replaces the pool uid this used to carry: every jail runs as
+  // UID 1000, so the uid tied a log line to nothing, while the label
+  // names the call site that produced the run.
+  const diagnostics = {
+    exitCode: raw.code,
+    signal: raw.signal,
+    label: raw.label,
+    argv: raw.argv,
+    cwd: raw.cwd,
+    wallMs: raw.wallMs,
+    cpuMs: measured?.cpuMs,
+    memKb: measured?.maxRssKb,
+    truncated,
+    stdoutLen: stdout.length,
+    stderrLen: stderr.length,
+    // The runner's own view of nsjail's wait status. `exitCode` above
+    // is the runner mirroring it, so these two agreeing is the normal
+    // case; `nsjailSignal !== 0` means nsjail ITSELF was signalled
+    // (the container OOM killer, or user code -- it shares UID 1000
+    // and `kill` is allowed), which `exitCode` alone cannot express.
+    nsjailExit: measured?.exit,
+    nsjailSignal: measured?.signal,
+  };
+  if (sandboxError !== undefined) {
+    logger.warn(
+      { ...diagnostics, sandboxError, nsjailLog: nsjailLog.slice(0, 2000) },
+      "sandbox: judge-side sandbox failure -- nothing of the user's was graded",
+    );
+    return { ok: false, sandboxError };
+  }
+  if (raw.code !== 0) {
+    logger.debug(
+      {
+        ...diagnostics,
+        nsjailLog: nsjailLog.slice(0, 1000),
+        childStderr: stderr.slice(0, 400),
+      },
+      "sandbox: non-clean exit",
+    );
+  }
+
+  const run: RunMeasurement = {
+    exitCode: raw.code,
+    runnerSignal: raw.signal,
+    parentWallMs: raw.wallMs,
+    nodeTimerFired: raw.killedByTimer,
+    stdout,
+    stderr,
+    truncated,
+  };
+  // Assigned rather than spread with `undefined` values so the keys are
+  // genuinely ABSENT on a force-killed run: `"cpuMs" in run` is how the
+  // measurement fixtures and their diff tell "measured zero" from "never
+  // measured", and `{cpuMs: undefined}` would answer that question wrong.
+  if (measured !== undefined) {
+    run.cpuMs = measured.cpuMs;
+    run.maxRssKb = measured.maxRssKb;
+    run.jailWallMs = measured.wallMs;
+    run.nsjailExit = measured.exit;
+    run.nsjailSignal = measured.signal;
+  }
+  return { ok: true, run };
+}
+
+/**
  * Shell out to nsjail with the argv described in the plan, wrapped in
  * the out-of-jail `wmoj-jailrun` reporter (see `JailRunReport`).
  * Responsibilities:
@@ -348,14 +534,19 @@ function looksLikeNsjailSetupFailure(exitCode: number | null, log: string): bool
  *     seccomp policy, env allow-list. Deliberately NO --chroot and no
  *     --user/--group -- see the comments above the argv below.
  *   - Stream `opts.stdin` to the child, collect capped stdout/stderr.
- *   - Read the runner's resource report off fd 4 and classify the run
- *     from it plus nsjail's exit status.
+ *   - Read the runner's resource report off fd 4 and REPORT it, as raw
+ *     numbers, alongside nsjail's exit status.
  *   - Honour the node-side last-resort SIGKILL timer, and guarantee
  *     that the promise settles and the process group dies either way.
+ *
+ * **It does not decide anything.** Whether a run timed out, blew its
+ * memory or merely crashed is `src/verdict`'s to say, from the
+ * `RunMeasurement` this returns plus the limits the route enforced. The
+ * one judgement left here is "did the judge's own machinery fail", which
+ * is the `ok: false` arm of `RunOutcome` and is not a verdict at all --
+ * a caller must throw on it, never grade it.
  */
-export async function runSandboxed(
-  opts: SandboxOpts,
-): Promise<SandboxResult> {
+export async function runSandboxed(opts: SandboxOpts): Promise<RunOutcome> {
   const timeLimitMs = clampMs(opts.timeLimitMs);
   const cpuSec = cpuLimitSecFor(timeLimitMs);
   // --rlimit_fsize is in MB per nsjail's docs; --rlimit_as is in MB.
@@ -447,7 +638,7 @@ export async function runSandboxed(
     "--env", "PYTHONUNBUFFERED",
     // nsjail's --time_limit is wall-clock and serves only as a liveness
     // backstop; CPU time (via --rlimit_cpu and the userland cpuMs check
-    // in classifyKill) is authoritative for TLE. Set generously beyond
+    // in `src/verdict`) is authoritative for TLE. Set generously beyond
     // Node's own SIGKILL timer so we get one authoritative wall kill
     // (Node's) rather than racing two wall timers against setup overhead.
     "--time_limit", argvInt(Math.ceil((timeLimitMs + KILL_GRACE_MS) / 1000) + 2),
@@ -536,9 +727,10 @@ export async function runSandboxed(
     // that group and dies with it without writing a report, so an absent
     // report is expected on exactly these paths and must not be reported
     // as a judge fault. The cost is that a run we had to force-kill has
-    // no CPU/RSS numbers -- acceptable, because step 1 of the ladder has
-    // already classified it as TO, and every ordinary TLE (RLIMIT_CPU
-    // firing inside the jail) still reports real ones.
+    // no CPU/RSS numbers -- acceptable, because `nodeTimerFired` is
+    // reported alongside and the verdict module's first ladder step
+    // reads it, and every ordinary TLE (RLIMIT_CPU firing inside the
+    // jail) still reports real ones.
     let killedByTimer = false;
     let forcedKill = false;
     const killDelayMs = Math.min(MAX_INT32, timeLimitMs + KILL_GRACE_MS);
@@ -650,140 +842,24 @@ export async function runSandboxed(
       }, absoluteDeadlineMs);
     });
 
-    const { code, signal, spawnError, deadlineExceeded } = outcome;
-
-    const wallMs = Date.now() - started;
-    const stdout = decodeChildOutput(out);
-    // The child's stderr is byte-clean: nsjail's logger writes to fd 3
-    // (captured separately into `nsjailLog` below) and the runner's
-    // report to fd 4, so nothing here came from either. Forward it to
-    // the caller as-is -- no filtering, no normalisation beyond the NUL
-    // substitution in decodeChildOutput. This is what makes
-    // /generate-tests parseable and what makes /submit's
-    // TestResult.stderr show the user's real stderr.
-    const stderr = decodeChildOutput(err);
-    // nsjail's fd-3 log is now DIAGNOSTIC ONLY -- no verdict is derived
-    // from its text. That matters because it is not settled whether the
-    // jailed process can write to fd 3 itself; while the six log regexes
-    // existed, a submission that could write there could forge its own
-    // CPU and memory numbers. It can now at worst pollute a log line
-    // and, by forging a `[F]` fatal prefix on an exit-255 run with no
-    // stdout, turn its OWN submission into a judge-fault 500.
-    const nsjailLog = Buffer.concat(log.chunks).toString("utf8");
-    const parsed = parseJailRunReport(
-      Buffer.concat(report.chunks).toString("utf8"),
-    );
-
-    let sandboxError: string | undefined;
-    if (spawnError !== null) {
-      // code === null here means nothing of the user's ever ran.
-      sandboxError = `sandbox could not be started: ${spawnError}`;
-    } else if (deadlineExceeded) {
-      sandboxError = "sandbox exceeded its absolute deadline and was force-killed";
-    } else if (parsed !== undefined && !parsed.ok) {
-      sandboxError = parsed.error;
-    } else if (parsed === undefined && !forcedKill) {
-      sandboxError =
-        "sandbox produced no resource report -- the jail runner did not complete";
-    } else if (looksLikeNsjailSetupFailure(code, nsjailLog) && stdout.length === 0) {
-      sandboxError = `nsjail failed to start the jail (exit ${String(code)})`;
-    }
-
-    const measured = parsed !== undefined && parsed.ok ? parsed.value : undefined;
-    const cpuMs = measured?.cpuMs ?? 0;
-    const memKb = measured?.maxRssKb ?? 0;
-    const jailWallMs = measured?.wallMs ?? wallMs;
-    const truncated = out.truncated || err.truncated;
-
-    const killedBy = classifyKill({
-      timedOutByNode: killedByTimer,
-      cpuMs: measured?.cpuMs,
-      maxRssKb: measured?.maxRssKb,
-      jailWallMs: measured?.wallMs,
-      signal,
-      exitCode: code,
-      wallMs,
-      timeLimitMs,
-      memLimitMb,
-    });
-
-    // Setup-overhead telemetry. `parentWallMs` includes Node's spawn,
-    // V8 GC pauses and event-loop jitter; `jailWallMs` is the runner's
-    // own fork()->wait4() measurement of nsjail. The delta is the
-    // judge's per-spawn overhead -- useful for verifying that TLE is no
-    // longer sensitive to it, and for alerting when it regresses. This
-    // number was itself always 0 while resource accounting was broken,
-    // which is why the regression it exists to catch went unnoticed.
-    logger.debug(
-      {
-        cpuMs,
-        memKb,
-        jailWallMs,
-        parentWallMs: wallMs,
-        setupOverheadMs: Math.max(0, wallMs - jailWallMs),
-        killedBy,
-        truncated,
-        timeLimitMs,
-      },
-      "sandbox: timing",
-    );
-
-    // Diagnostic logging. A student's program crashing is ordinary and
-    // logs at debug; only a JUDGE-side fault logs at warn. The old
-    // condition fired at warn on every single RE case -- up to 200 per
-    // submission, 6 KB of attacker-chosen text each -- on a metered
-    // free-tier instance, and its second disjunct (`code >= 128`) was a
-    // strict subset of its first (`code !== 0`) and never added anything.
-    const diagnostics = {
-      exitCode: code,
-      signal,
-      killedBy,
+    const raw: RawRun = {
+      code: outcome.code,
+      signal: outcome.signal,
+      spawnError: outcome.spawnError,
+      deadlineExceeded: outcome.deadlineExceeded,
+      out,
+      err,
+      log,
+      report,
+      wallMs: Date.now() - started,
+      forcedKill,
+      killedByTimer,
+      label: opts.label,
       argv: opts.argv,
       cwd: opts.cwd,
-      uid: opts.uid,
-      wallMs,
-      cpuMs,
-      memKb,
-      truncated,
-      stdoutLen: stdout.length,
-      stderrLen: stderr.length,
-      // The runner's own view of nsjail's wait status. `exitCode` above
-      // is the runner mirroring it, so these two agreeing is the normal
-      // case; `nsjailSignal !== 0` means nsjail ITSELF was signalled
-      // (the container OOM killer, or user code -- it shares UID 1000
-      // and `kill` is allowed), which `exitCode` alone cannot express.
-      nsjailExit: measured?.exit,
-      nsjailSignal: measured?.signal,
+      timeLimitMs,
     };
-    if (sandboxError !== undefined) {
-      logger.warn(
-        { ...diagnostics, sandboxError, nsjailLog: nsjailLog.slice(0, 2000) },
-        "sandbox: judge-side sandbox failure -- nothing of the user's was graded",
-      );
-    } else if (code !== 0) {
-      logger.debug(
-        {
-          ...diagnostics,
-          nsjailLog: nsjailLog.slice(0, 1000),
-          childStderr: stderr.slice(0, 400),
-        },
-        "sandbox: non-clean exit",
-      );
-    }
-
-    const result: SandboxResult = {
-      exitCode: code,
-      timedOut: killedBy === "TO",
-      memKb,
-      timeMs: jailWallMs,
-      cpuMs,
-      stdout,
-      stderr,
-      killedBy,
-      truncated,
-    };
-    if (sandboxError !== undefined) result.sandboxError = sandboxError;
-    return result;
+    return interpretRun(raw);
   } finally {
     // Unconditional, on every path including a thrown one. Descendants
     // must never outlive their submission: with no PID namespace, no
@@ -800,170 +876,75 @@ export async function runSandboxed(
  * The failure this exists for is silent by construction: when the CPU
  * and RSS numbers stop arriving, nothing throws and nothing logs -- the
  * judge simply reports `cpuMs: 0, memKb: 0` forever, and with them go
- * the authoritative TLE gate and both RSS-based MLE rules. That state
+ * the authoritative TLE gate and the RSS-based MLE rule. That state
  * shipped and survived, so the sandbox now proves itself instead.
  *
  * Runs a shell loop that deliberately overspends a 50 ms budget and
- * asserts BOTH halves of the contract: that CPU time is measured at all,
- * and that the ladder converts it into `TO`. Costs well under a second
- * even on a throttled host. `server.ts` should await this at boot next
- * to `probeToolchainAtBoot` and refuse to start on `ok: false` -- a
+ * asserts that CPU time is measured at all, and that enough of it was
+ * measured for the ladder's authoritative step to fire. Costs well under
+ * a second even on a throttled host. `server.ts` awaits this at boot next
+ * to `probeToolchainAtBoot` and refuses to start on `ok: false` -- a
  * judge that cannot measure CPU time returns wrong verdicts on every
  * submission, which is strictly worse than not booting. It doubles as
  * the missing nsjail/policy.kafel boot probe: an image whose policy will
- * not compile fails this with a `sandboxError` rather than grading every
+ * not compile fails this with a judge fault rather than grading every
  * submission `RE`.
+ *
+ * **This commit checks the measurement half only.** The check used to
+ * call the classifier and assert the kill class was `TO`; the ladder now
+ * lives in `src/verdict` and asserting it here would make the sandbox
+ * depend on the module it was just separated from. The ladder half is a
+ * unit test in the meantime (`test/unit/verdict.test.ts` grades the
+ * `selfcheck` measurement fixture and requires `TLE`), and the liveness
+ * module in the next commit restores the end-to-end assertion in
+ * production by calling `gradeCase` on this very measurement. The gap is
+ * narrow: `cpuMs >= probeTimeLimitMs` below IS the ladder's step 2, which
+ * is the step that decides this probe.
  */
 export async function sandboxSelfCheck(): Promise<
   | { ok: true; value: { cpuMs: number; memKb: number; timeMs: number } }
   | { ok: false; error: string }
 > {
   const probeTimeLimitMs = 50;
-  const sb = await runSandboxed({
+  const outcome = await runSandboxed({
     argv: ["/bin/sh", "-c", "i=0; while [ $i -lt 200000 ]; do i=$((i+1)); done"],
     cwd: os.tmpdir(),
-    uid: 1000,
-    gid: 1000,
+    label: "liveness:measure",
     timeLimitMs: probeTimeLimitMs,
     memLimitMb: 128,
     stdin: "",
   });
 
-  if (sb.sandboxError !== undefined) {
-    return { ok: false, error: `sandbox self-check could not run: ${sb.sandboxError}` };
+  if (!outcome.ok) {
+    return {
+      ok: false,
+      error: `sandbox self-check could not run: ${outcome.sandboxError}`,
+    };
   }
-  if (sb.cpuMs === 0) {
+  const run = outcome.run;
+  if (run.cpuMs === undefined || run.cpuMs === 0) {
     return {
       ok: false,
       error:
-        "sandbox self-check measured cpuMs=0 for a CPU-bound probe -- resource " +
+        "sandbox self-check measured no cpuMs for a CPU-bound probe -- resource " +
         "accounting is broken, so TLE and MLE would never fire",
     };
   }
-  if (sb.killedBy !== "TO") {
+  if (run.cpuMs < probeTimeLimitMs) {
     return {
       ok: false,
       error:
-        `sandbox self-check burned ${String(sb.cpuMs)}ms of CPU against a ` +
-        `${String(probeTimeLimitMs)}ms limit but was classified ` +
-        `${sb.killedBy ?? "null"} instead of TO`,
+        `sandbox self-check burned only ${String(run.cpuMs)}ms of CPU against a ` +
+        `${String(probeTimeLimitMs)}ms limit, so the authoritative TLE gate ` +
+        "would not have fired on a probe built to overspend it",
     };
   }
-  return { ok: true, value: { cpuMs: sb.cpuMs, memKb: sb.memKb, timeMs: sb.timeMs } };
-}
-
-/**
- * Decide the `killedBy` classification. CPU time is the authoritative
- * measure of program cost -- parent-measured wall time includes Node's
- * spawn, nsjail's fork/exec, kafel parse, BPF compile, V8 GC, and
- * event-loop jitter, none of which is user work, and all of which vary
- * run-to-run under load. The old "wallMs >= timeLimitMs" check produced
- * flaky TLE on identical submissions; this ladder decides from CPU time
- * and uses wall only as a loose liveness backstop.
- *
- * Order of checks:
- *   1. Node's last-resort SIGKILL timer fired     -> TO  (stuck nsjail/kernel)
- *   2. CPU time consumed >= user's timeLimitMs    -> TO  (authoritative)
- *   3. Clean exit (0, no signal) && CPU in budget -> null (AC/WA)
- *   4. Jail wall >= 3 * timeLimitMs               -> TO  (sleepy/blocked)
- *   5. Peak RSS at >=98% of the memory cap        -> OOM
- *   6. nsjail's 128+signal status                 -> TO for SIGXCPU (and
- *      for a SIGKILL that already overran the budget), else SIG
- *   7. A signal on the runner itself              -> SIG
- *   8. Null exit code (spawn failure)             -> SIG
- *   9. Otherwise                                  -> null
- *
- * Step 3 sitting after step 2 is what keeps a program that finished but
- * overspent its budget a TLE. Step 5 sitting after step 3 is what keeps
- * a solution that used its whole budget and exited cleanly an AC.
- * Reordering either reintroduces a bug that has already been fixed once.
- *
- * The two steps that used to sit at #2 and #3 -- "nsjail reported
- * RLIMIT_CPU" and "nsjail reported a memory limit exceeded" -- are gone
- * with the log scraper that fed them. nsjail 3.3 never emitted either
- * phrase, so neither had ever fired; step 2 and step 5 now do that work
- * from real measurements, and step 6 catches the kernel's SIGXCPU
- * directly out of the exit status.
- */
-function classifyKill(args: {
-  timedOutByNode: boolean;
-  cpuMs: number | undefined;
-  maxRssKb: number | undefined;
-  jailWallMs: number | undefined;
-  signal: NodeJS.Signals | null;
-  exitCode: number | null;
-  wallMs: number;
-  timeLimitMs: number;
-  memLimitMb: number;
-}): SandboxResult["killedBy"] {
-  const {
-    timedOutByNode,
-    cpuMs,
-    maxRssKb,
-    jailWallMs,
-    signal,
-    exitCode,
-    wallMs,
-    timeLimitMs,
-    memLimitMb,
-  } = args;
-
-  if (timedOutByNode) return "TO";
-
-  // CPU-time TLE (authoritative). This is `wait4()`'s rusage for nsjail
-  // and every descendant it reaped -- actual CPU work consumed by the
-  // program, independent of host scheduling or judge overhead, which is
-  // what makes verdicts deterministic across runs and across hosts.
-  if (cpuMs !== undefined && cpuMs >= timeLimitMs) return "TO";
-
-  // Clean-exit guard. A normal exit(0) with no signal and no node-side
-  // kill means the program actually finished -- never downgrade it to
-  // TLE on wall noise. (The CPU-time check above has already rejected
-  // programs that finished but exceeded their budget.)
-  if (exitCode === 0 && signal === null) return null;
-
-  // Wall-clock liveness backstop. Catches programs that block on
-  // syscalls (sleep, I/O wait) without consuming CPU. Uses the runner's
-  // inner wall clock when available (excludes Node's spawn latency);
-  // 3x cushion keeps the threshold far from legitimate-run noise while
-  // still bounding wedged submissions. Node's SIGKILL timer (fired at
-  // timeLimitMs + KILL_GRACE_MS) is the tighter of the two in practice.
-  const innerWallMs = jailWallMs ?? wallMs;
-  if (innerWallMs >= timeLimitMs * 3) return "TO";
-
-  // Peak RSS at (or within 2% of) the cap on a run that did NOT exit
-  // cleanly -- the clean-exit guard above has already returned for those.
-  // The 2% band exists because RSS is sampled by the kernel at page
-  // granularity and a process that is being torn down for exceeding its
-  // limit rarely reports the round number exactly. Note this is the peak
-  // of the whole jail tree, so it includes nsjail's own few MB; that
-  // cannot manufacture a false MLE at any realistic cap, and it can only
-  // ever over-report, never hide a real one.
-  const memLimitKb = memLimitMb * 1024;
-  if (maxRssKb !== undefined && maxRssKb >= memLimitKb * MEM_LIMIT_RSS_RATIO) {
-    return "OOM";
-  }
-
-  // In --mode o nsjail's own exit status IS the jailed child's fate:
-  // `128 + WTERMSIG` when a signal killed it. Node's `signal` argument
-  // describes what killed the RUNNER, which is null in every one of
-  // these cases, so before this decode existed the ladder fell all the
-  // way through to `null` and a SIGXCPU kill came back as `RE` with
-  // `timedOut: false` -- neither a TLE verdict nor a timeout flag -- on
-  // any host fast enough for RLIMIT_CPU to beat the wall timers.
-  if (exitCode !== null && exitCode > 128 && exitCode <= 128 + 64) {
-    const childSignal = exitCode - 128;
-    // SIGXCPU is RLIMIT_CPU firing: unambiguously a timeout.
-    if (childSignal === SIGXCPU_NUM) return "TO";
-    // SIGKILL is nsjail's own --time_limit wall backstop when the run
-    // has already outlived its budget; a program that SIGKILLs itself
-    // inside its budget stays a runtime error.
-    if (childSignal === SIGKILL_NUM && innerWallMs >= timeLimitMs) return "TO";
-    return "SIG";
-  }
-
-  if (signal !== null) return "SIG";
-  if (exitCode === null) return "SIG";
-
-  return null;
+  return {
+    ok: true,
+    value: {
+      cpuMs: run.cpuMs,
+      memKb: run.maxRssKb ?? 0,
+      timeMs: run.jailWallMs ?? run.parentWallMs,
+    },
+  };
 }

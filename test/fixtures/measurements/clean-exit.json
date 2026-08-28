@@ -1,0 +1,42 @@
+{
+  "name": "clean-exit",
+  "intended": "AC",
+  "note": "ladder step 3 — a clean exit inside its budget classifies as nothing",
+  "requires": [],
+  "limits": {
+    "timeLimitMs": 2000,
+    "memLimitMb": 256
+  },
+  "expected": "42\n",
+  "outcome": {
+    "ok": true,
+    "run": {
+      "exitCode": 0,
+      "runnerSignal": null,
+      "parentWallMs": 8,
+      "nodeTimerFired": false,
+      "stdout": "42\n",
+      "stderr": "",
+      "truncated": false,
+      "cpuMs": 6,
+      "maxRssKb": 7744,
+      "jailWallMs": 6,
+      "nsjailExit": 0,
+      "nsjailSignal": 0
+    }
+  },
+  "result": {
+    "index": 0,
+    "exitCode": 0,
+    "passed": true,
+    "expected": "42\n",
+    "received": "42\n",
+    "stderr": "",
+    "stdout": "42\n",
+    "timedOut": false,
+    "verdict": "AC",
+    "timeMs": 6,
+    "cpuMs": 6,
+    "memKb": 7744
+  }
+}

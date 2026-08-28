@@ -1,0 +1,42 @@
+{
+  "name": "clean-exit-wrong",
+  "intended": "WA",
+  "note": "ladder step 3 with the judge saying no — the WA half of the same branch",
+  "requires": [],
+  "limits": {
+    "timeLimitMs": 2000,
+    "memLimitMb": 256
+  },
+  "expected": "42\n",
+  "outcome": {
+    "ok": true,
+    "run": {
+      "exitCode": 0,
+      "runnerSignal": null,
+      "parentWallMs": 7,
+      "nodeTimerFired": false,
+      "stdout": "41\n",
+      "stderr": "",
+      "truncated": false,
+      "cpuMs": 5,
+      "maxRssKb": 7292,
+      "jailWallMs": 5,
+      "nsjailExit": 0,
+      "nsjailSignal": 0
+    }
+  },
+  "result": {
+    "index": 0,
+    "exitCode": 0,
+    "passed": false,
+    "expected": "42\n",
+    "received": "41\n",
+    "stderr": "",
+    "stdout": "41\n",
+    "timedOut": false,
+    "verdict": "WA",
+    "timeMs": 5,
+    "cpuMs": 5,
+    "memKb": 7292
+  }
+}

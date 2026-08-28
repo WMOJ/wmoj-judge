@@ -1,0 +1,42 @@
+{
+  "name": "rlimit-cpu-kill",
+  "intended": "TLE",
+  "note": "ladder step 6 — the kernel's RLIMIT_CPU kill, exit 137 already over budget",
+  "requires": [],
+  "limits": {
+    "timeLimitMs": 500,
+    "memLimitMb": 256
+  },
+  "expected": "",
+  "outcome": {
+    "ok": true,
+    "run": {
+      "exitCode": 137,
+      "runnerSignal": null,
+      "parentWallMs": 2007,
+      "nodeTimerFired": false,
+      "stdout": "",
+      "stderr": "",
+      "truncated": false,
+      "cpuMs": 2004,
+      "maxRssKb": 7472,
+      "jailWallMs": 2005,
+      "nsjailExit": 137,
+      "nsjailSignal": 0
+    }
+  },
+  "result": {
+    "index": 0,
+    "exitCode": 137,
+    "passed": false,
+    "expected": "",
+    "received": "",
+    "stderr": "",
+    "stdout": "",
+    "timedOut": true,
+    "verdict": "TLE",
+    "timeMs": 2005,
+    "cpuMs": 2004,
+    "memKb": 7472
+  }
+}

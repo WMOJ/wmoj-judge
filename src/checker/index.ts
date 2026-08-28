@@ -1,8 +1,9 @@
 import { constants as fsConstants, promises as fs } from "fs";
 import * as path from "path";
 import { nanoid } from "nanoid";
-import type { SandboxResult } from "../types";
+import type { RunMeasurement } from "../types";
 import { runSandboxed } from "../sandbox/nsjail";
+import { decodeJailExit } from "../sandbox/exitStatus";
 import { buildChildEnv } from "../sandbox/minimalEnv";
 import { runCompile } from "../util/compile";
 
@@ -65,24 +66,6 @@ const CHECKER_MESSAGE_TRUNCATED_MARKER = "… (truncated)";
 const TRAILING_REPLACEMENT_RE = /�$/;
 
 /**
- * Exit status at or above which the checker cannot have chosen its own
- * exit code, so its result carries no verdict.
- *
- * In `--mode o` nsjail's own exit status IS the jailed child's fate:
- * `128 + WTERMSIG` when a signal killed it (139 SIGSEGV, 134 SIGABRT,
- * 159 SIGSYS — a syscall outside `policy.kafel`), and **255** when
- * nsjail could not `execve` the child at all. In every one of those
- * cases nsjail itself exits *normally*, so Node's `signal` argument is
- * `null` and `killedBy` can legitimately be `null` too — which is why
- * "could not answer" cannot be detected from `killedBy` alone.
- *
- * The documented "any other non-zero ⇒ rejected" row is about codes a
- * checker deliberately *chooses*; the testlib convention only uses 0–7,
- * so `>= 128` is unambiguous and 255 is included by it.
- */
-const CHECKER_FATAL_EXIT_FLOOR = 128;
-
-/**
  * Outcome of running the checker on one test case.
  *
  *   accepted       exit 0                        -> the case passes
@@ -100,17 +83,23 @@ export interface CheckerVerdict {
   message: string;
   /** Raw exit code, for logging. */
   exitCode: number | null;
-  /**
-   * Set ONLY when the judge's own sandbox machinery failed while trying
-   * to run the checker — see `SandboxResult.sandboxError`. Nothing of
-   * the checker ran, so this is not a statement about the problem or the
-   * submission and **must not be graded**: the caller throws, and the
-   * route's `catch` turns it into the documented `500 {error}` judge-
-   * fault channel. `outcome` is set to `internal-error` alongside it so
-   * that a caller which ignores this field still cannot report `WA`.
-   */
-  sandboxError?: string;
 }
+
+/**
+ * What one checker invocation produced: a verdict, or the judge's own
+ * sandbox machinery failing before the checker could say anything.
+ *
+ * The fault arm is deliberately NOT a `CheckerVerdict` with an extra
+ * field. It used to be — `outcome: "internal-error"` plus an optional
+ * `sandboxError` — and an optional field is a field a caller can forget:
+ * ignore it and the judge breaking becomes `IE`, a problem-configuration
+ * fault billed to a problem that is fine. Behind `ok` there is no way to
+ * reach the verdict without having looked. `ok: false` must be thrown on,
+ * so the route's `catch` returns the documented `500 {error}`.
+ */
+export type CheckerRun =
+  | { ok: true; verdict: CheckerVerdict }
+  | { ok: false; sandboxError: string };
 
 /**
  * Compile the checker with the SAME hardcoded invocation
@@ -192,9 +181,9 @@ function truncateBytes(s: string, maxBytes: number): string {
 }
 
 /**
- * Map a checker's sandbox result onto a `CheckerVerdict`. Pure — split
- * out from `runChecker` so the exit-code convention can be exercised
- * without a sandbox.
+ * Map a checker's measurement onto a `CheckerVerdict`. Pure — split out
+ * from `runChecker` so the exit-code convention can be exercised without
+ * a sandbox.
  *
  * Anything the checker could not answer authoritatively — killed by the
  * sandbox, dead by a signal, never exec'd, or an explicit exit 3 — is an
@@ -202,37 +191,51 @@ function truncateBytes(s: string, maxBytes: number): string {
  * never silently folded into WA: a broken checker must be visible, not
  * blamed on the student.
  *
- * The `>= CHECKER_FATAL_EXIT_FLOOR` arm is the one that makes that true.
- * `killedBy !== null || exitCode === null` alone missed every checker
- * that segfaulted (139), aborted (134), tripped seccomp (159) or could
- * not be exec'd (255), because nsjail reports the child's death as its
- * OWN exit status and exits normally itself: those all fell through to
- * `default: rejected` and the whole problem was graded `WA` with no
- * `IE` anywhere, and — when the checker's stderr was empty — no
- * `checkerMessage` either. The problem looked healthy; the student
- * looked wrong. `classifyKill` now decodes `128 + WTERMSIG` as well, so
- * most of these arrive with `killedBy === "SIG"`; this stays as
- * belt-and-braces because the cost of being wrong here is invisible
- * mass-misgrading.
+ * **The `code >= 128` arm is a POLICY, not a second decoder.**
+ * `decodeJailExit` already says what nsjail's status means; on top of it
+ * this function adds a rule about checker *trustworthiness*: exit codes
+ * from 128 up are reserved for the `128 + WTERMSIG` encoding and for
+ * nsjail's own 255 ("could not execve"), so a checker cannot legitimately
+ * choose one, and a result carrying one cannot be read as a verdict.
+ * Without that arm, a checker that segfaulted (139), aborted (134) or
+ * could not be exec'd (255) fell through to `default: rejected` — nsjail
+ * reports the child's death as its OWN exit status and exits normally, so
+ * Node's signal is `null` — and the whole problem was graded `WA` with no
+ * `IE` anywhere and, when the checker's stderr was empty, no
+ * `checkerMessage` either. The problem looked healthy; the student looked
+ * wrong. That is the failure this arm exists to prevent, and the cost of
+ * being wrong here is invisible mass-misgrading.
+ *
+ * Note what is deliberately NOT consulted: the kill ladder. It lives in
+ * `src/verdict` now and applies the *submission's* limits, not the
+ * checker's. Every way a checker is actually killed still lands here —
+ * `RLIMIT_CPU` and `RLIMIT_AS` both end in a signal, so a `signalled`
+ * status; the judge's last-resort kill sets `nodeTimerFired`; a signalled
+ * runner sets `runnerSignal`. What the ladder would have added on top is
+ * "the checker answered, but spent more than its budget doing so", and a
+ * checker that answered is a checker that answered.
  */
-export function classifyCheckerResult(
-  exitCode: number | null,
-  killedBy: SandboxResult["killedBy"],
-  stderr: string,
-): CheckerVerdict {
-  const message = truncateBytes(stderr.trim(), CHECKER_MESSAGE_MAX_BYTES);
+export function classifyCheckerResult(run: RunMeasurement): CheckerVerdict {
+  const message = truncateBytes(run.stderr.trim(), CHECKER_MESSAGE_MAX_BYTES);
+  const exitCode = run.exitCode;
 
-  // The checker was killed (TLE/OOM/signal), died by a signal nsjail
-  // reported as its own status, could not be exec'd, or never started.
-  if (
-    killedBy !== null ||
-    exitCode === null ||
-    exitCode >= CHECKER_FATAL_EXIT_FLOOR
-  ) {
+  // The judge killed it, or the runner itself was signalled: nothing the
+  // checker wrote can be trusted as a complete answer.
+  if (run.nodeTimerFired || run.runnerSignal !== null) {
     return { outcome: "internal-error", message, exitCode };
   }
 
-  switch (exitCode) {
+  const exit = decodeJailExit(exitCode);
+  // `none` — nothing ran. `signalled` — the checker died by a signal
+  // nsjail reported as its own status.
+  if (exit.kind !== "exited") {
+    return { outcome: "internal-error", message, exitCode };
+  }
+  if (exit.code >= 128) {
+    return { outcome: "internal-error", message, exitCode };
+  }
+
+  switch (exit.code) {
     case 0:
       return { outcome: "accepted", message, exitCode };
     case 1:
@@ -251,8 +254,6 @@ export function classifyCheckerResult(
 export interface RunCheckerOpts {
   /** Submission workdir; the compiled `checker.out` lives here. */
   workDir: string;
-  /** Pool UID held by this submission. Diagnostics only, as elsewhere. */
-  uid: number;
   /** Test-case index. Appears in the scratch filenames for readability. */
   index: number;
   /** Exactly the bytes the contestant's program received on stdin. */
@@ -297,11 +298,11 @@ export interface RunCheckerOpts {
  *    not answer", it counts as failed in `summary`, and it keeps a
  *    single bad case from discarding every verdict already computed.
  *
- * The one failure that is NOT graded is a `sandboxError`: that is the
- * judge's own machinery breaking, so it is handed back for the caller to
- * throw on.
+ * The one failure that is NOT graded is `ok: false`: that is the judge's
+ * own machinery breaking, so it is handed back, behind a discriminant the
+ * caller cannot read past without looking, for the caller to throw on.
  */
-export async function runChecker(opts: RunCheckerOpts): Promise<CheckerVerdict> {
+export async function runChecker(opts: RunCheckerOpts): Promise<CheckerRun> {
   const token = nanoid(10);
   const inName = `checker-${opts.index}-${token}-input.txt`;
   const expName = `checker-${opts.index}-${token}-expected.txt`;
@@ -318,34 +319,31 @@ export async function runChecker(opts: RunCheckerOpts): Promise<CheckerVerdict> 
     await fs.writeFile(path.join(opts.workDir, expName), opts.expected, "utf8");
     await fs.writeFile(path.join(opts.workDir, outName), opts.received, "utf8");
 
-    const sb = await runSandboxed({
+    const outcome = await runSandboxed({
       argv: [`./${CHECKER_BINARY_FILENAME}`, inName, expName, outName],
       cwd: opts.workDir,
-      uid: opts.uid,
-      gid: opts.uid,
+      label: `checker:case${String(opts.index)}`,
       timeLimitMs: CHECKER_TIME_LIMIT_MS,
       memLimitMb: CHECKER_MEM_LIMIT_MB,
       stdin: "",
     });
 
-    if (sb.sandboxError !== undefined) {
-      return {
-        outcome: "internal-error",
-        message: "",
-        exitCode: sb.exitCode,
-        sandboxError: sb.sandboxError,
-      };
+    if (!outcome.ok) {
+      return { ok: false, sandboxError: outcome.sandboxError };
     }
 
-    return classifyCheckerResult(sb.exitCode, sb.killedBy, sb.stderr);
+    return { ok: true, verdict: classifyCheckerResult(outcome.run) };
   } catch (err) {
     return {
-      outcome: "internal-error",
-      message: truncateBytes(
-        `checker harness error: ${(err as Error).message}`,
-        CHECKER_MESSAGE_MAX_BYTES,
-      ),
-      exitCode: null,
+      ok: true,
+      verdict: {
+        outcome: "internal-error",
+        message: truncateBytes(
+          `checker harness error: ${(err as Error).message}`,
+          CHECKER_MESSAGE_MAX_BYTES,
+        ),
+        exitCode: null,
+      },
     };
   } finally {
     // `recursive` because the scratch path could be a directory: an
