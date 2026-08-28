@@ -4,6 +4,7 @@ import * as path from "path";
 import { runSandboxed } from "../sandbox/nsjail";
 import { acquireUid, releaseUid } from "../queue/uidPoolSingleton";
 import { buildChildEnv } from "../sandbox/minimalEnv";
+import { setterCompileArgv } from "../languages";
 import { runCompile, type CompileResult } from "../util/compile";
 import { createWorkdir, cleanupWorkdir, isRootNode } from "../util/workdir";
 import { logger } from "../util/logger";
@@ -43,8 +44,15 @@ const GENERATOR_MAX_OUTPUT_BYTES = MAX_INPUT_CASES * MAX_INPUT_BYTES_PER_CASE + 
 
 /**
  * Language codes this route accepts. It validates the field and then
- * ignores it — the compile line below is hardcoded C++17 — but the set
- * is part of the published contract, so keep it as-is.
+ * ignores it — every generator is built with the problem-setter compile
+ * line — but the set is part of the published contract, so keep it as-is.
+ *
+ * Deliberately DIFFERENT from `/submit`'s, which is now exactly the
+ * `languages.json` keys: bare `cpp` is gone from `/submit` and stays
+ * here, because `wmoj-app`'s
+ * `.agents/skills/add-problem/scripts/judge.sh:95` sends `"cpp"` to this
+ * endpoint and nothing else. The reverse difference is just as
+ * deliberate: `cpp20`/`cpp23` are accepted by `/submit` and refused here.
  */
 const ACCEPTED_LANGUAGES: readonly string[] = ["cpp", "cpp14", "cpp17"];
 const ACCEPTED_LANGUAGES_TEXT = ACCEPTED_LANGUAGES.join("/");
@@ -76,23 +84,25 @@ const ACCEPTED_LANGUAGES_TEXT = ACCEPTED_LANGUAGES.join("/");
  */
 const SUBMISSION_SOURCE_HEADROOM_BYTES = 200_000;
 
+/** The generator's source and binary inside the workdir. */
+const GENERATOR_SOURCE_FILENAME = "Generator.cpp";
+const GENERATOR_BINARY_FILENAME = "gen.out";
+
 /**
- * Compile a generator's C++ source. Compilation runs OUTSIDE nsjail
- * (it's a trusted `g++` invocation on admin-submitted source, same
- * trust boundary as the existing /generate-tests endpoint) but uses
- * `minimalEnv` to scrub the child environment.
+ * Compile a generator's C++ source with the problem-setter compile line
+ * from `src/languages` — the same one a custom checker gets, and the same
+ * dialect a `cpp17` submission gets. Compilation runs OUTSIDE nsjail
+ * (it's a trusted `g++` invocation on admin-submitted source, same trust
+ * boundary as the checker's) but uses `minimalEnv` to scrub the child
+ * environment.
+ *
+ * The names are relative to the workdir, which is the child's cwd, so a
+ * diagnostic in the 400 below reads `Generator.cpp:3:1: error:` rather
+ * than naming the judge's `/tmp/judge-<nanoid>` path back to the admin.
  */
-function compileGenerator(
-  workDir: string,
-  srcPath: string,
-  outPath: string,
-): Promise<CompileResult> {
+function compileGenerator(workDir: string): Promise<CompileResult> {
   return runCompile(
-    // -fmax-errors bounds the diagnostics at the source. runCompile's capped
-    // collectors bound what the judge *keeps*; this bounds what g++ spends CPU
-    // producing, on the one endpoint whose compile is neither sandboxed nor
-    // timed.
-    ["/usr/bin/g++", "-O2", "-std=gnu++17", "-fmax-errors=50", srcPath, "-o", outPath],
+    setterCompileArgv(GENERATOR_SOURCE_FILENAME, GENERATOR_BINARY_FILENAME),
     workDir,
     buildChildEnv(),
   );
@@ -178,15 +188,15 @@ generateTestsRouter.post("/", async (req: Request, res: Response) => {
     uid = await acquireUid();
     workDir = await createWorkdir(uid);
 
-    const srcPath = path.join(workDir, "Generator.cpp");
-    const outPath = path.join(workDir, "gen.out");
+    const srcPath = path.join(workDir, GENERATOR_SOURCE_FILENAME);
+    const outPath = path.join(workDir, GENERATOR_BINARY_FILENAME);
     await fs.writeFile(srcPath, code, "utf8");
     // Make sure the pool UID can read the source and write the binary.
     // Only meaningful when Node runs as root; under unprivileged Node
     // (Render) the files are already owned by the running UID.
     if (isRootNode) await fs.chown(srcPath, uid, uid).catch(() => {});
 
-    const compileRes = await compileGenerator(workDir, srcPath, outPath);
+    const compileRes = await compileGenerator(workDir);
     if (!compileRes.ok) {
       res.status(400).json({ error: `Compilation failed\n${compileRes.stderr}` });
       return;
@@ -194,7 +204,7 @@ generateTestsRouter.post("/", async (req: Request, res: Response) => {
     if (isRootNode) await fs.chown(outPath, uid, uid).catch(() => {});
 
     const outcome = await runSandboxed({
-      argv: ["./gen.out"],
+      argv: [`./${GENERATOR_BINARY_FILENAME}`],
       cwd: workDir,
       label: "generator",
       timeLimitMs: GENERATOR_TIME_LIMIT_MS,

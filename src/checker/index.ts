@@ -5,6 +5,7 @@ import type { RunMeasurement } from "../types";
 import { runSandboxed } from "../sandbox/nsjail";
 import { decodeJailExit } from "../sandbox/exitStatus";
 import { buildChildEnv } from "../sandbox/minimalEnv";
+import { setterCompileArgv } from "../languages";
 import { runCompile } from "../util/compile";
 
 /**
@@ -102,16 +103,21 @@ export type CheckerRun =
   | { ok: false; sandboxError: string };
 
 /**
- * Compile the checker with the SAME hardcoded invocation
- * `/generate-tests` uses for generators:
- * `/usr/bin/g++ -O2 -std=gnu++17 Checker.cpp -o checker.out`.
+ * Compile the checker with the problem-setter compile line from
+ * `src/languages` — the same one `/generate-tests` builds its generators
+ * with, now by CONSTRUCTION rather than by two hand-spelled copies
+ * happening to agree. They did not: this one carried no `-fmax-errors`
+ * and passed absolute paths, so a checker diagnostic leaked the
+ * `/tmp/judge-<nanoid>` workdir into `checkerError`.
  *
- * Deliberately not routed through `Executor.compile()`: that interface
- * takes only a workdir and compiles the single hardcoded `Main.cpp`
- * from `languages.json`, so it cannot compile a second file. Like the
- * generator's, this compile runs OUTSIDE nsjail — same trust boundary,
- * it is problem-setter source, not contestant source — but still with a
- * scrubbed child env.
+ * The dialect is the SUBMISSION dialect (`cpp17`'s `-std=c++17`), not the
+ * `gnu++17` this used to spell: all 64 problem-setter programs stored in
+ * production compile clean under it, and none is testlib-derived — see
+ * `docs/adr/0003-problem-setter-code-compiles-under-the-submission-dialect.md`.
+ *
+ * Like the generator's, this compile runs OUTSIDE nsjail — same trust
+ * boundary, it is problem-setter source, not contestant source — but
+ * still with a scrubbed child env.
  *
  * MUST be called after the compile cache has been populated for this
  * submission: the cache stores the whole workdir keyed on (language,
@@ -142,7 +148,7 @@ export async function compileChecker(
   }
 
   const result = await runCompile(
-    ["/usr/bin/g++", "-O2", "-std=gnu++17", srcPath, "-o", outPath],
+    setterCompileArgv(CHECKER_SOURCE_FILENAME, CHECKER_BINARY_FILENAME),
     workDir,
     buildChildEnv(),
   );

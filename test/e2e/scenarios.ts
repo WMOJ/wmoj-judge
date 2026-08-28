@@ -79,9 +79,9 @@ export type Patterns = Readonly<Record<string, string>>;
 /**
  * A `/submit` body. `language` and `compareMode` are typed as `string`
  * rather than the union in `types.ts` on purpose: several scenarios exist
- * precisely to pin what the judge does with a value the union forbids
- * (`"java"`), or with a legacy alias the union still allows but the
- * request should be seen to spell out (`"cpp"`).
+ * precisely to pin what the judge does with a value the union forbids —
+ * `"java"`, and the retired legacy aliases `"python"` and `"cpp"`, which
+ * `/submit` now rejects and `/generate-tests` still accepts.
  */
 export interface SubmitRequestBody {
   language: string;
@@ -570,6 +570,33 @@ export const SCENARIOS: readonly Scenario[] = [
     },
     requires: [],
     intended: "400 — Java was removed",
+  },
+  {
+    name: "legacy-alias-python-400",
+    endpoint: "/submit",
+    request: {
+      language: "python",
+      code: program("sum.py"),
+      input: ["1 2\n"],
+      output: ["3\n"],
+    },
+    requires: [],
+    intended:
+      '400 — the legacy "python" alias is gone from /submit; it is not judged as python3',
+  },
+  {
+    name: "legacy-alias-cpp-400",
+    endpoint: "/submit",
+    request: {
+      language: "cpp",
+      code: program("sum.cpp"),
+      input: ["1 2\n"],
+      output: ["3\n"],
+    },
+    requires: [],
+    intended:
+      '400 — the legacy "cpp" alias is gone from /submit, while /generate-tests still ' +
+      "accepts it (see generator-ok)",
   },
   {
     name: "400-unequal-arrays",

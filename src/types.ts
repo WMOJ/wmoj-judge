@@ -1,13 +1,14 @@
 // Shared types for wmoj-judge. Interfaces here are frozen per the plan's
 // "Module boundaries" contract — A, B, C all import from this file.
 
-export type Language =
-  | "python3"
-  | "pypy3"
-  | "cpp14"
-  | "cpp17"
-  | "cpp20"
-  | "cpp23";
+/**
+ * Re-exported, not declared: `Language` is now the `keyof` of
+ * `languages.json` (see `src/languages`), so the accepted codes and the
+ * table the judge runs from cannot drift apart the way a hand-kept union
+ * beside a JSON file could. The contract still names it here.
+ */
+import type { Language } from "./languages";
+export type { Language };
 
 export type Verdict = "AC" | "WA" | "TLE" | "MLE" | "RE" | "CE" | "IE";
 
@@ -18,7 +19,7 @@ export type CompareMode =
   | "float-epsilon";
 
 export interface SubmitRequest {
-  language: Language | "python" | "cpp"; // legacy accepted during cutover
+  language: Language;
   code: string;
   input: string[];
   output: string[];
@@ -27,8 +28,9 @@ export interface SubmitRequest {
   compareMode?: CompareMode;
   /**
    * Optional C++ source for a custom checker (problems whose answer is
-   * not unique). Compiled once per submission with
-   * `g++ -O2 -std=gnu++17` and invoked per test case as
+   * not unique). Compiled once per submission with the problem-setter
+   * compile line (`src/languages`' `setterCompileArgv`, the `cpp17`
+   * entry's dialect) and invoked per test case as
    *
    *   checker.out <input_file> <expected_file> <contestant_output_file>
    *
@@ -116,15 +118,6 @@ export interface SubmitResponse {
    * student for our broken checker.
    */
   checkerError?: string;
-}
-
-export interface Executor {
-  filename(code: string): string;
-  prepare(workDir: string, code: string): Promise<void>;
-  compile(
-    workDir: string,
-  ): Promise<{ ok: true } | { ok: false; stderr: string }>;
-  buildRunCommand(workDir: string, filename: string): { argv: string[] };
 }
 
 export interface SandboxOpts {

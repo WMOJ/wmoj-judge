@@ -118,8 +118,8 @@ uts, cgroup), chroot, `--user`/`--group`, cgroups.
   submission shares UID 1000 and one `/tmp` root, so **cross-submission isolation does not hold**.
   `prlimit64` and `sched_setaffinity` are filtered to `pid == 0` so a submission cannot retarget the
   judge; `kill`/`tgkill` deliberately are not (CPython's `abort()` needs a non-zero pid).
-- **Compilation is NOT sandboxed** — `g++` is spawned directly with no timeout and no rlimits in
-  `executors/cpp.ts`, `checker/index.ts`, and `routes/generateTests.ts`. A compile bomb can OOM the
+- **Compilation is NOT sandboxed** — `g++` is spawned directly (`util/compile.ts`) with no timeout
+  and no rlimits for submissions, checkers and generators alike. A compile bomb can OOM the
   service, and `#include` of an arbitrary path leaks its contents through `compileError`. Only the
   *run* step goes through nsjail.
 - **Resource accounting comes from `wmoj-jailrun`**, a small C wrapper built into the image that
@@ -147,9 +147,9 @@ WA/AC order and the kill ladder are internals guarded by `test/unit/verdict.test
 
 ## Languages
 
-`languages.json` is the source of truth: `python3`, `pypy3` (384 MB default), `cpp14/17/20/23`
-(`g++ -O2 -std=c++NN`). Legacy aliases `python`→`python3` and `cpp`→`cpp17` are still accepted for the
-wmoj-app cutover. Adding one touches eight places, one unchecked by `tsc` → **`add-language`**.
+`languages.json` is the source of truth and `src/languages` derives everything from it (`Language`
+is its `keyof`): `python3`, `pypy3` (384 MB floor), `cpp14/17/20/23`. Adding one → **`add-language`**.
+`/submit` takes only canonical codes; `/generate-tests` still takes bare `cpp` for `judge.sh`.
 
 ## Concurrency & config
 
@@ -200,7 +200,7 @@ pack the reason in via a `so <consequence>` clause. **Zero trailers of any kind.
 4. The `/submit` contract — compile errors stay HTTP 200 with `compileError`, checker compile errors
    HTTP 200 with `checkerError`, and the two must never be merged. **Cross-repo breaking change**;
    coordinate with `wmoj-app`.
-5. The legacy `python`/`cpp` aliases, and `wmoj-jailrun`'s report format (parsed in `nsjail.ts`).
+5. `wmoj-jailrun`'s report format (parsed in `nsjail.ts`), and the checker/generator dialect (ADR 0003).
 6. Never widen the seccomp allowlist, the compile trust boundary, or the env allowlist just to make
    something work.
 

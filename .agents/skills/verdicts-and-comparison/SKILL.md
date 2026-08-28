@@ -195,7 +195,7 @@ and the ceiling is a parameter: clamping is the route's job (the verdict module 
 back as `effectiveMemoryLimitMb`:
 
 ```
-max( 1, floor( min( max(payload.memoryLimit ?? 0, languages.json memoryLimitMb ?? 0) || 256,
+max( 1, floor( min( max(payload.memoryLimit ?? 0, languages.json memoryFloorMb ?? 0) || 256,
                     HOST_MEMORY_CEILING_MB ) ) )
 ```
 

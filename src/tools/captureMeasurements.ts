@@ -8,7 +8,7 @@ import { runCompile } from "../util/compile";
 import { runSandboxed } from "../sandbox/nsjail";
 import { buildChildEnv } from "../sandbox/minimalEnv";
 import { gradeCase, type CaseLimits, type Judge } from "../verdict";
-import languagesJson from "../../languages.json";
+import { languageSpec } from "../languages";
 
 /**
  * Capture the measurement fixtures the verdict module is tested against.
@@ -379,19 +379,13 @@ const SCENARIOS: readonly CaptureScenario[] = [
 ];
 
 /**
- * The compile line for C++ scenarios, taken from `languages.json` rather
- * than spelled out here so a fixture is always captured with the flags a
- * real `cpp17` submission gets. `-O2` matters: the segfault scenario's
- * comment is about what -O2 does to a null store.
+ * The language spec C++ scenarios are compiled and run with, rather than
+ * a compile line spelled out here, so a fixture is always captured with
+ * the flags and the filenames a real `cpp17` submission gets. `-O2`
+ * matters: the segfault scenario's comment is about what -O2 does to a
+ * null store.
  */
-function cppCompileArgv(srcPath: string, outPath: string): string[] {
-  const argv = languagesJson.cpp17.compile.argv;
-  return argv.map((arg) => {
-    if (arg === "Main.cpp") return srcPath;
-    if (arg === "a.out") return outPath;
-    return arg;
-  });
-}
+const CPP = languageSpec("cpp17");
 
 /** Progress and diagnostics. Never stdout — that carries the JSON. */
 function note(line: string): void {
@@ -410,20 +404,25 @@ async function capture(scenario: CaptureScenario): Promise<CapturedFixture> {
     if (scenario.program.kind === "argv") {
       argv = [...scenario.program.argv];
     } else {
-      const srcPath = path.join(dir, "Main.cpp");
-      const outPath = path.join(dir, "a.out");
-      await fs.writeFile(srcPath, scenario.program.source, "utf8");
-      const compiled = await runCompile(
-        cppCompileArgv(srcPath, outPath),
-        dir,
-        buildChildEnv(),
+      if (CPP.compileArgv === null) {
+        throw new Error(
+          "languages.json: cpp17 has no compile step, so no C++ scenario can be captured",
+        );
+      }
+      await fs.writeFile(
+        path.join(dir, CPP.filename),
+        scenario.program.source,
+        "utf8",
       );
+      // Compiled in the scenario directory, which is also the sandbox's
+      // cwd below — the same relative-name arrangement a submission gets.
+      const compiled = await runCompile(CPP.compileArgv, dir, buildChildEnv());
       if (!compiled.ok) {
         throw new Error(
           `${scenario.name}: the scenario's own source did not compile\n${compiled.stderr}`,
         );
       }
-      argv = [outPath];
+      argv = [...CPP.runArgv];
     }
 
     const outcome = await runSandboxed({

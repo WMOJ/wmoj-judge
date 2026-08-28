@@ -1,0 +1,23 @@
+{
+  "name": "legacy-alias-python-400",
+  "endpoint": "/submit",
+  "request": {
+    "language": "python",
+    "code": "# Reads two integers and prints their sum. CPython/PyPy twin of sum.cpp.\nimport sys\n\na, b = map(int, sys.stdin.readline().split())\nprint(a + b)\n",
+    "input": [
+      "1 2\n"
+    ],
+    "output": [
+      "3\n"
+    ]
+  },
+  "requires": [],
+  "status": 400,
+  "response": {
+    "error": "Unsupported language: python"
+  },
+  "patterns": {},
+  "measured": {
+    "results": []
+  }
+}

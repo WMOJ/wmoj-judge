@@ -18,12 +18,12 @@ Request:
 
 ```ts
 {
-  language: "python3"|"pypy3"|"cpp14"|"cpp17"|"cpp20"|"cpp23"|"python"|"cpp",
+  language: "python3"|"pypy3"|"cpp14"|"cpp17"|"cpp20"|"cpp23",   // "python"/"cpp" → 400
   code: string,
   input: string[],           // equal length
   output: string[],          // equal length
   timeLimit?: number,        // ms, default 5000, no upper bound
-  memoryLimit?: number,      // MB, default = language default ?? 256
+  memoryLimit?: number,      // MB; max(requested, language floor) || 256, then the host ceiling
   compareMode?: "exact"|"trim-trailing"|"whitespace"|"float-epsilon",
   checker?: string           // C++ source; absent/null/blank ⇒ byte comparison
 }
@@ -73,8 +73,10 @@ is a problem-configuration fault that must never reach a student as their own co
 `{code, language?}` → `{inputJson, outputJson, input: string[], output: string[]}`. The generator
 prints a JSON array of inputs to **stdout** and expected outputs to **stderr**, equal length.
 **A compile failure here is 400, not 200** — the opposite of `/submit`, and deliberate: a generator
-is admin input, not a student's. `language` is validated (`cpp`/`cpp14`/`cpp17` only) and then
-ignored; compilation is always `-O2 -std=gnu++17`. A generator that exits non-zero is 400 with
+is admin input, not a student's. `language` is validated (`cpp`/`cpp14`/`cpp17` only — bare `cpp`
+stays accepted here for `judge.sh`, unlike `/submit`) and then ignored; compilation is always
+`-O2 -std=c++17 -fmax-errors=50`, the submission dialect (ADR 0003), with relative paths so a
+compile-failure 400 reads `Generator.cpp:3:1: error: …`. A generator that exits non-zero is 400 with
 `error: "Generator exited with code N"`, plus ` (killed by the judge after the time limit)` or
 ` (signal S)` when that is what happened; `wmoj-app` shows the string verbatim and does not parse it.
 

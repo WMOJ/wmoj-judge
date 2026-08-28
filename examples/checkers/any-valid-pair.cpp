@@ -4,7 +4,7 @@
 // a problem whose answer is not unique. wmoj-judge compiles it once per
 // submission with
 //
-//     /usr/bin/g++ -O2 -std=gnu++17 Checker.cpp -o checker.out
+//     /usr/bin/g++ -O2 -std=c++17 -fmax-errors=50 Checker.cpp -o checker.out
 //
 // and runs it once per test case, inside the same nsjail sandbox as the
 // contestant's program, as

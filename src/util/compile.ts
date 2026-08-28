@@ -78,7 +78,7 @@ export type CompileResult = { ok: true } | { ok: false; stderr: string };
  * rather than a 500.
  *
  * The single implementation for all three g++ invocations in this service —
- * a submission (`executors/cpp.ts`), a generator (`routes/generateTests.ts`)
+ * a submission (`routes/submit.ts`), a generator (`routes/generateTests.ts`)
  * and a checker (`checker/index.ts`). All three spawn g++ outside nsjail and
  * put its diagnostics into an HTTP body; sharing one function is what stops
  * them drifting into three different truncation, decoding and

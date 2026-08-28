@@ -1,6 +1,6 @@
 ---
 name: custom-checkers
-description: Works on wmoj-judge's custom-checker path for problems whose answer is not unique — the hardcoded g++ compile line and why it bypasses Executor.compile(), the once-per-submission compile ordering the compile cache depends on, the per-case three-file invocation and its limits, the testlib exit-code table and its IE cases, and the checkerMessage truncation rules. Use whenever someone wants to write, debug, change, review, or extend a checker, the checker field of POST /submit, src/checker/, checkerError, or IE verdicts.
+description: Works on wmoj-judge's custom-checker path for problems whose answer is not unique — the problem-setter compile line shared with /generate-tests through src/languages (the submission dialect, ADR 0003), the once-per-submission compile ordering the compile cache depends on, the per-case three-file invocation and its limits, the testlib exit-code table and its IE cases, and the checkerMessage truncation rules. Use whenever someone wants to write, debug, change, review, or extend a checker, the checker field of POST /submit, src/checker/, checkerError, or IE verdicts.
 ---
 
 # Custom checkers in wmoj-judge
@@ -15,16 +15,20 @@ change behaviour.
 
 ## How a checker runs
 
-**1. Compiled once per submission, never per case**, with a hardcoded invocation:
+**1. Compiled once per submission, never per case**, through `setterCompileArgv` in
+`src/languages` — the `cpp17` entry's compiler and standard, assembled by the one `cppCompileArgv`
+every submission uses:
 
 ```
-/usr/bin/g++ -O2 -std=gnu++17 Checker.cpp -o checker.out
+/usr/bin/g++ -O2 -std=c++17 -fmax-errors=50 Checker.cpp -o checker.out
 ```
 
-This is deliberately **not** routed through `Executor.compile()`. That interface takes only a
-workdir and builds the single hardcoded `Main.cpp` from `languages.json`, so it cannot compile a
-second file at all. Like the generator's, this compile runs **outside nsjail** — problem-setter
-source is the same trust boundary `/generate-tests` already assumed — but with a scrubbed child env.
+Relative paths, run with `cwd: workDir`, so a diagnostic in `checkerError` reads `Checker.cpp:3:1:
+…` and never leaks the workdir. The dialect is the **submission's** by decision, not by accident:
+every stored checker and generator (64 of 64) was audited under both `gnu++17` and `c++17` before
+the switch — `docs/adr/0003-problem-setter-code-compiles-under-the-submission-dialect.md`. Like the
+generator's, this compile runs **outside nsjail** — problem-setter source is the same trust boundary
+`/generate-tests` already assumed — but with a scrubbed child env.
 
 **2. Compiled AFTER the compile cache has been populated. This ordering is load-bearing.** The cache
 stores the *whole workdir* keyed on `sha256(language ‖ code ‖ compileArgv)`. A `checker.out` sitting
@@ -149,7 +153,7 @@ exit code (`pair.accept.out`, `pair.reject.out`, `pair.presentation.out`,
 **There is no runner script.** The fixtures are invoked by hand:
 
 ```bash
-g++ -O2 -std=gnu++17 examples/checkers/any-valid-pair.cpp -o /tmp/checker.out
+g++ -O2 -std=c++17 -fmax-errors=50 examples/checkers/any-valid-pair.cpp -o /tmp/checker.out
 cd examples/checkers/fixtures && /tmp/checker.out pair.in pair.expected pair.accept.out; echo $?
 ```
 
@@ -168,7 +172,9 @@ sandbox; see the `sandbox-changes` skill for why `/app` and the workdir are writ
 
 ## Never
 
-- Never route the checker compile through `Executor.compile()` — it can only build `Main.cpp`.
+- Never spell a g++ line by hand — every compile in the judge comes from `src/languages`
+  (`cppCompileArgv`/`setterCompileArgv`), and never move the checker off the submission dialect
+  without redoing the audit behind ADR 0003.
 - Never compile the checker before the compile cache `put()`, and never cache a workdir containing
   `checker.out`.
 - Never merge `checkerError` into `compileError`, and never return 4xx for either. Every failure path
