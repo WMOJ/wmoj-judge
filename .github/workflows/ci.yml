@@ -34,6 +34,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "17 4 * * *"   # recapture-measurements only
   workflow_dispatch:
 
 concurrency:
@@ -42,6 +44,7 @@ concurrency:
 
 jobs:
   unit:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -77,6 +80,7 @@ jobs:
           retention-days: 1
 
   e2e:
+    if: github.event_name != 'schedule'
     needs: image
     runs-on: ubuntu-latest
     steps:
@@ -134,3 +138,67 @@ jobs:
           path: test/fixtures/e2e/
       - if: failure()
         run: docker logs judge
+
+  # Re-capture the measurement fixtures on the x86_64 runner and diff them
+  # against the committed set (ADR 0002). Runs when anything that can change
+  # what the sandbox reports has changed, and nightly regardless, because a
+  # fixture is only as true as its last capture: the nsjail-3.3 log scraper
+  # matched nothing for the whole life of the pin and nothing said so. The
+  # fresh capture is uploaded either way so a legitimate change can be
+  # reviewed and committed from the artifact.
+  recapture-measurements:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request'
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: decide whether a sandbox-affecting path changed
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          if [ -z "$base" ] || ! git cat-file -e "$base" 2>/dev/null; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if git diff --name-only "$base" "${{ github.sha }}" | grep -qE '^(Dockerfile|policy\.kafel|src/sandbox/|src/verdict/|src/tools/|test/fixtures/measurements/)'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.paths.outputs.changed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - if: steps.paths.outputs.changed == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: image
+      - if: steps.paths.outputs.changed == 'true'
+        run: docker load < image.tgz
+      - if: steps.paths.outputs.changed == 'true'
+        name: capture inside the image
+        run: |
+          docker run --rm -e LOG_LEVEL=silent -e JUDGE_SHARED_SECRET=ci \
+            --entrypoint node wmoj-judge:ci dist/tools/captureMeasurements.js > fresh.json
+      - if: steps.paths.outputs.changed == 'true'
+        run: npm ci
+      - if: steps.paths.outputs.changed == 'true'
+        run: npx tsx test/tools/diffMeasurements.ts fresh.json test/fixtures/measurements
+      - if: always() && steps.paths.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: measurement-fixtures
+          path: fresh.json

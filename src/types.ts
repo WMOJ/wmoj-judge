@@ -59,7 +59,7 @@ export interface TestResult {
   /**
    * CPU time (user + system) actually consumed by the jailed process
    * tree, in milliseconds. Measured by `wait4()`/`getrusage` in the
-   * out-of-jail runner — see `SandboxResult.cpuMs`. Between the
+   * out-of-jail runner — see `RunMeasurement.cpuMs`. Between the
    * introduction of the nsjail 3.3 pin and that runner this was `0` on
    * every single run, which silently disabled the authoritative TLE
    * gate; treat a whole response of `cpuMs: 0` as a judge fault, not as
@@ -98,10 +98,13 @@ export interface SubmitResponse {
   summary: { total: number; passed: number; failed: number };
   results: TestResult[];
   /**
-   * The memory cap actually enforced on the sandbox, in MB:
-   * `min(requested ?? language default ?? 256, HOST_MEMORY_CEILING_MB)`.
-   * A problem may declare more than the host can back; this reports what
-   * was really applied.
+   * The memory cap actually enforced on the sandbox, in MB — an integer:
+   *   max(1, floor(min(max(requested, languageFloor) || 256, HOST_MEMORY_CEILING_MB)))
+   * `max`, not `??`: both real clients always send a number, so a language
+   * FLOOR (pypy3 → 384) has to win over a smaller declared limit or it
+   * never applies. A consequence worth knowing: a problem cannot currently
+   * declare a limit TIGHTER than a language's floor; the floor wins and
+   * this field reports it, so the override is visible rather than silent.
    */
   effectiveMemoryLimitMb: number;
   /** The user's code failed to compile. Their fault. */
@@ -127,8 +130,14 @@ export interface Executor {
 export interface SandboxOpts {
   argv: string[];
   cwd: string;
-  uid: number;
-  gid: number;
+  /**
+   * Which call site spawned this jail — "submit:case3", "checker:case3",
+   * "generator", "liveness:launch", "liveness:measure", "capture:<name>".
+   * Diagnostics only: it is what ties a sandbox log line back to the work
+   * that produced it, which the pool uid it replaces never did (every jail
+   * runs as 1000). Required so a caller cannot forget it.
+   */
+  label: string;
   timeLimitMs: number;
   memLimitMb: number;
   stdin: string;
@@ -154,58 +163,58 @@ export interface SandboxOpts {
   maxStderrBytes?: number;
 }
 
-export interface SandboxResult {
+/**
+ * The raw facts about one run. Carries NO verdict and NO threshold: every
+ * "was it a timeout / did it blow memory" decision is `src/verdict`'s,
+ * from these numbers and the limits the route enforced. That split is
+ * what lets the whole TLE→MLE→RE→IE ladder be exercised from a JSON file
+ * (`test/fixtures/measurements`) with no Linux kernel involved.
+ */
+export interface RunMeasurement {
   /**
-   * The jailed program's exit code as nsjail reports it: its own status
-   * for a normal exit, or `128 + WTERMSIG` when a signal killed it.
-   * `null` only when nothing ran (spawn failure) or the runner itself
-   * was signalled — both of which also set `sandboxError`.
+   * nsjail's exit status as mirrored by wmoj-jailrun: the program's own
+   * code, or 128+WTERMSIG when a signal killed it. null when the runner
+   * itself was signalled or never ran.
    */
   exitCode: number | null;
-  timedOut: boolean;
-  /** Peak RSS of the jailed process tree in KB. See `cpuMs`. */
-  memKb: number;
+  /** The signal that killed the RUNNER (Node's view of its direct child), or null. */
+  runnerSignal: NodeJS.Signals | null;
   /**
-   * Wall time of the jail, in ms: the runner's own measurement across
-   * `fork()`→`wait4()` of nsjail, so it excludes Node's spawn latency
-   * and V8 pauses. Falls back to parent-measured wall time only when
-   * the run was force-killed and no report survived.
+   * From the runner's report. Absent only when no report survived, which
+   * happens exactly when the judge force-killed the group.
    */
-  timeMs: number;
-  /**
-   * CPU time (user + system) of the jailed process tree in ms, from
-   * `wait4()`'s `rusage`. This is the quantity `classifyKill` treats as
-   * the authoritative TLE gate; it is real, kernel-accounted work, not
-   * a number scraped out of nsjail's log.
-   */
-  cpuMs: number;
+  cpuMs?: number;
+  maxRssKb?: number;
+  jailWallMs?: number;
+  nsjailExit?: number;
+  nsjailSignal?: number;
+  /** Parent-measured wall, spawn to settle. Always present. */
+  parentWallMs: number;
+  /** Node's last-resort SIGKILL timer fired (timeLimitMs + KILL_GRACE_MS). */
+  nodeTimerFired: boolean;
   stdout: string;
   stderr: string;
-  killedBy: "TO" | "OOM" | "SIG" | null;
-  /**
-   * True when stdout or stderr exceeded its cap and the retained string
-   * is a prefix. See `TestResult.truncated`.
-   */
   truncated: boolean;
-  /**
-   * Set ONLY when the judge's own sandbox machinery failed, never for
-   * anything the user's program did: nsjail or the runner could not be
-   * spawned, nsjail bailed before executing anything (an unreadable or
-   * uncompilable `--seccomp_policy`, a missing `--cwd`), or the run
-   * produced no resource report at all.
-   *
-   * Callers must treat this as "the judge is wrong" — throw, so the
-   * route's `catch` returns `500 {error}` — and must NOT grade it. The
-   * failure it exists to stop is a container where `policy.kafel` will
-   * not compile: nsjail exits 255 with its diagnostic on fd 3, so the
-   * child's stdout and stderr are both empty, and every test case of
-   * every submission comes back `RE` on a clean HTTP 200 while
-   * `/health` still says `{"status":"ok"}`.
-   *
-   * Deliberately not `IE`: `IE` is documented as checker-only.
-   */
-  sandboxError?: string;
 }
+
+/**
+ * Either a measurement or a judge fault. `ok:false` is the former optional
+ * `sandboxError` field made unignorable: a caller has to look at `ok`
+ * before it can reach `run`, which is what stops a sixth call site
+ * repeating the /health bug commit 1 fixed.
+ *
+ * `sandboxError` is set ONLY when the judge's own sandbox machinery
+ * failed, never for anything the user's program did: nsjail or the runner
+ * could not be spawned, nsjail bailed before executing anything (an
+ * unreadable or uncompilable `--seccomp_policy`, a missing `--cwd`), or
+ * the run produced no resource report at all. Callers must treat it as
+ * "the judge is wrong" — throw, so the route's `catch` returns
+ * `500 {error}` — and must NOT grade it. Deliberately not `IE`: `IE` is
+ * documented as checker-only.
+ */
+export type RunOutcome =
+  | { ok: true; run: RunMeasurement }
+  | { ok: false; sandboxError: string };
 
 export interface UidPool {
   acquire(): Promise<number>;

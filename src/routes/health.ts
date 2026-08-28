@@ -165,29 +165,37 @@ async function probeSandbox(): Promise<string | null> {
   const launch = runSandboxed({
     argv: [...SANDBOX_PROBE_ARGV],
     cwd: os.tmpdir(),
-    // The sandbox deliberately passes no --user/--group (see nsjail.ts),
-    // so these are the judge's own ids and nsjail ignores them; they are
-    // required by SandboxOpts, not by the jail.
-    uid: process.getuid?.() ?? 1000,
-    gid: process.getgid?.() ?? 1000,
+    label: "liveness:launch",
     timeLimitMs: SANDBOX_PROBE_TIME_MS,
     memLimitMb: SANDBOX_PROBE_MEM_MB,
     stdin: "",
   })
-    .then((result): string | null => {
-      // The runner's own fault channel comes first. A launch that exits 0
-      // with no resource report is the reporter being dead, and
-      // `sandboxError` is the only field that says so — `exitCode` and
-      // `killedBy` both look healthy, which is how /health answered "ok"
-      // while every /submit case was a 500.
-      if (result.sandboxError !== undefined) {
-        return `sandbox launch failed: ${result.sandboxError}`;
+    .then((outcome): string | null => {
+      // The runner's own fault channel comes first, and now it cannot be
+      // skipped: a launch that exits 0 with no resource report is the
+      // reporter being dead, and `ok` is the only thing that says so —
+      // the exit code and the streams all look healthy, which is how
+      // /health answered "ok" while every /submit case was a 500. The
+      // union is what makes forgetting that check a type error rather
+      // than a silent green light.
+      if (!outcome.ok) {
+        return `sandbox launch failed: ${outcome.sandboxError}`;
       }
-      if (result.exitCode === 0 && result.killedBy === null) return null;
-      const killed =
-        result.killedBy === null ? "" : `, killedBy ${result.killedBy}`;
+      const run = outcome.run;
+      if (
+        run.exitCode === 0 &&
+        run.runnerSignal === null &&
+        !run.nodeTimerFired
+      ) {
+        return null;
+      }
+      const killed = run.nodeTimerFired
+        ? ", killed by the judge after the time limit"
+        : run.runnerSignal !== null
+          ? `, runner signalled ${run.runnerSignal}`
+          : "";
       const what = SANDBOX_PROBE_ARGV.join(" ");
-      return `sandbox launch failed: ${what} exited ${String(result.exitCode)}${killed}`;
+      return `sandbox launch failed: ${what} exited ${String(run.exitCode)}${killed}`;
     })
     .catch((err: unknown): string | null => {
       // Must never reject. When the deadline wins the race below there
