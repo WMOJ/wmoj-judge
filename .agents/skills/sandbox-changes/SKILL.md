@@ -173,7 +173,13 @@ a semaphore permit leaked permanently. Sixteen of those wedged the whole judge w
 green, and only a redeploy recovered. Four things keep that fixed, and none of them is optional:
 
 1. Settle on **`'exit'`**, then drain the pipes for `STREAM_DRAIN_MS` (250 ms) and `destroy()` them.
-   `'close'` stays as the fast path when it arrives first.
+   `'close'` stays as the fast path when it arrives first. The **report pipe (fd 4) is the one
+   exception**: nothing but the runner can hold it (`FD_CLOEXEC` before the fork), so its EOF is
+   guaranteed once the runner is gone, and the drain *waits* for it instead of cutting it off. libuv
+   can reap the runner inside its SIGCHLD callback one poll batch before it reads the pipe, and a
+   0.1-CPU host throttled between those batches let the timer win — `destroy()` discarded a report
+   the runner had written, and a finished run came back as a `no resource report` 500.
+   `test/unit/sandbox/runSandboxed.test.ts` pins both halves with a fake runner.
 2. `spawn(..., { detached: true })`, so the runner is a process-group leader.
 3. Kill the **group** — `process.kill(-child.pid, "SIGKILL")` — never `child.kill()`, which targets a
    pid libuv has already reaped and returns `false`.

@@ -36,6 +36,18 @@ const MAX_INT32 = 2_147_483_647;
  * for every one of those copies, so it can never arrive. Settle on
  * `'exit'` instead, give the pipes this long to hand over whatever the
  * kernel already buffered, then destroy them.
+ *
+ * The report pipe (fd 4) is the one stream this timer must NOT cut off.
+ * No descendant can hold it -- the runner marks it FD_CLOEXEC before it
+ * forks -- so its EOF is guaranteed the moment the runner is gone, and
+ * the only question is whether the event loop has read it yet. libuv can
+ * reap the runner inside its SIGCHLD callback one poll batch before it
+ * reads the pipe, and a 0.1-CPU host throttled between those two batches
+ * lets this timer win the race: `destroy()` then discards a report the
+ * runner did write, and a run that finished normally comes back as a
+ * judge fault (HTTP 500, "no resource report"). So the drain path waits
+ * for the report's `'end'` before it settles, bounded by the absolute
+ * deadline alone. `test/unit/sandbox/runSandboxed.test.ts` pins it.
  */
 const STREAM_DRAIN_MS = 250;
 
@@ -720,9 +732,25 @@ export async function runSandboxed(opts: SandboxOpts): Promise<RunOutcome> {
       logStream.on("error", () => {});
     }
     const reportStream = child.stdio[4] as NodeJS.ReadableStream | null;
+    // Whether the report pipe has delivered EOF. The drain path below
+    // waits for this instead of destroying the pipe -- see STREAM_DRAIN_MS
+    // for the race that made a finished run a 500. `onReportEnded` is the
+    // drain's continuation once its timer has elapsed with no EOF yet.
+    let reportEnded = reportStream === null;
+    let onReportEnded: (() => void) | null = null;
     if (reportStream) {
       reportStream.on("data", (c: Buffer) => collect(report, MAX_REPORT_BYTES, c));
       reportStream.on("error", () => {});
+      const ended = (): void => {
+        reportEnded = true;
+        const continuation = onReportEnded;
+        onReportEnded = null;
+        if (continuation !== null) continuation();
+      };
+      // `'end'` is the EOF read; `'close'` is the deadline's `destroy()`,
+      // which must release the same wait.
+      reportStream.once("end", ended);
+      reportStream.once("close", ended);
     }
 
     // `forcedKill` records that WE destroyed the group. The runner is in
@@ -806,7 +834,7 @@ export async function runSandboxed(opts: SandboxOpts): Promise<RunOutcome> {
       // green. Give the pipes a bounded drain, then take what we have.
       child.once("exit", (exitCode, exitSignal) => {
         if (settled) return;
-        drainTimer = setTimeout(() => {
+        const finish = (): void => {
           destroyStreams();
           settle({
             code: exitCode,
@@ -814,6 +842,17 @@ export async function runSandboxed(opts: SandboxOpts): Promise<RunOutcome> {
             spawnError: null,
             deadlineExceeded: false,
           });
+        };
+        drainTimer = setTimeout(() => {
+          if (reportEnded) {
+            finish();
+            return;
+          }
+          // Fds 1/2 have had their drain. The report has not arrived,
+          // but its EOF is guaranteed (STREAM_DRAIN_MS), so wait for it
+          // rather than destroy the one pipe a descendant cannot be
+          // holding. The absolute deadline still bounds this wait.
+          onReportEnded = finish;
         }, STREAM_DRAIN_MS);
       });
 
