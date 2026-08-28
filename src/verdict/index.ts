@@ -208,10 +208,10 @@ const ALLOCATION_FAILURE_RE =
  * >= 98% of the enforced cap" -- and it is gone because it could never
  * add an answer. It was evaluated only on a non-clean run, which is
  * exactly the condition under which the ladder had already run its own
- * RSS step against the same number and the same ratio: every case rule 2
- * could have matched arrives here already carrying `OOM`, and every case
- * where the ladder returned `TO` first is a TLE before memory is even
- * consulted. `submit.ts` already described it as a duplicate of the
+ * RSS step against the same number and the same ratio: every case that
+ * rule could have matched arrives here already carrying `OOM`, and every
+ * case where the ladder returned `TO` first is a TLE before memory is
+ * even consulted. `submit.ts` already described it as a duplicate of the
  * ladder's step; deleting it changes no verdict and removes the second
  * copy of `MEM_LIMIT_RSS_RATIO` that made the two able to drift.
  *

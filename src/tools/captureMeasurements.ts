@@ -201,25 +201,42 @@ const SCENARIOS: readonly CaptureScenario[] = [
   {
     name: "rss-over-cap",
     intended: "MLE",
-    // Which rule fires depends on whether the 250 MiB allocation is
-    // refused (RLIMIT_AS, giving `std::bad_alloc` on stderr) or granted
-    // (giving peak RSS at the cap). Both are MLE; the tool prints which,
-    // and the recorded fixture shows it.
-    note: "memory — 250 MiB against a 256 MB cap, by ladder step 5 or by the stderr rule",
+    // Ladder step 5 on its own: fill the address space one MiB at a time,
+    // touching every page, until `--rlimit_as` refuses the next chunk,
+    // then exit non-zero with NOTHING on stderr — so the RSS step is the
+    // only rule that can call this MLE. The cap is 1024 MB rather than the
+    // 256 MB every other scenario uses because RSS can never exceed the
+    // address space, and the loader plus libc/libstdc++ already hold
+    // ~6 MB of it: at 256 MB that overhead is bigger than the 2% band and
+    // a program that fills its space still stops short of the threshold.
+    // The loop is bounded so a host that does not enforce RLIMIT_AS (an
+    // emulated arm64 laptop) cannot run away; there it lands over the cap
+    // by the bound instead of by refusal.
+    //
+    // Every store goes through `volatile`. With -O2 g++ deletes a `new[]`
+    // whose bytes are written and never read — the whole allocation, not
+    // just the stores — and the first version of this scenario compiled
+    // to `return 1;`.
+    note: "ladder step 5 — RSS at the cap on a run that filled its address space and exited by itself",
     requires: ["rlimit_as"],
     program: {
       kind: "cpp",
       source:
-        "#include <cstring>\n" +
+        "#include <cstddef>\n" +
+        "#include <new>\n" +
         "int main() {\n" +
-        "  const std::size_t n = 250u << 20;\n" +
-        "  char* p = new char[n];\n" +
-        "  std::memset(p, 1, n);\n" +
+        "  const std::size_t chunk = static_cast<std::size_t>(1) << 20;\n" +
+        "  const std::size_t bound = static_cast<std::size_t>(1024 + 64) << 20;\n" +
+        "  for (std::size_t total = 0; total < bound; total += chunk) {\n" +
+        "    volatile char* p = new (std::nothrow) char[chunk];\n" +
+        "    if (p == nullptr) break;\n" +
+        "    for (std::size_t i = 0; i < chunk; i += 4096) p[i] = 1;\n" +
+        "  }\n" +
         "  return 1;\n" +
         "}\n",
     },
     expected: "",
-    limits: { timeLimitMs: 2000, memLimitMb: 256 },
+    limits: { timeLimitMs: 2000, memLimitMb: 1024 },
   },
   {
     name: "refused-allocation",
@@ -228,17 +245,21 @@ const SCENARIOS: readonly CaptureScenario[] = [
     // `new` fails instead of the kernel killing anything. The program
     // aborts by itself and looks exactly like a runtime error unless its
     // stderr is read — which is the whole reason MLE is tested before the
-    // `exitCode !== 0` branch.
+    // `exitCode !== 0` branch. Same program as the `mle-refused-allocation`
+    // golden: it reads the memory back and prints it, so -O2 cannot delete
+    // the allocation (see `rss-over-cap`).
     note: "memory — a refused allocation, exit 134 with std::bad_alloc on stderr",
     requires: ["rlimit_as"],
     program: {
       kind: "cpp",
       source:
-        "#include <cstring>\n" +
+        "#include <cstddef>\n" +
+        "#include <cstdio>\n" +
         "int main() {\n" +
-        "  const std::size_t n = 600u << 20;\n" +
+        "  const std::size_t n = static_cast<std::size_t>(600) << 20;\n" +
         "  char* p = new char[n];\n" +
-        "  std::memset(p, 1, n);\n" +
+        "  for (std::size_t i = 0; i < n; i += 4096) p[i] = 1;\n" +
+        "  std::printf(\"%d\\n\", static_cast<int>(p[0]));\n" +
         "  return 0;\n" +
         "}\n",
     },

@@ -74,11 +74,11 @@ WMOJ-JAILRUN v1 error=<what> errno=<n>
 
 | Field | Source | Consumed by |
 |---|---|---|
-| `exit` | `WEXITSTATUS`, or `-1` if nsjail was signalled | diagnostics; `SandboxResult.exitCode` comes from the runner's own exit status, which mirrors it |
-| `signal` | `WTERMSIG` of **nsjail itself**, or 0 | diagnostics |
+| `exit` | `WEXITSTATUS`, or `-1` if nsjail was signalled | `RunMeasurement.nsjailExit`; `RunMeasurement.exitCode` comes from the runner's own exit status, which mirrors it |
+| `signal` | `WTERMSIG` of **nsjail itself**, or 0 | `RunMeasurement.nsjailSignal`, diagnostics |
 | `cpu_us` | `ru_utime + ru_stime` | `cpuMs`, the authoritative TLE gate |
-| `maxrss_kb` | `ru_maxrss` (KB on Linux) | `memKb`, MLE rules 1 and 2, `classifyKill` step 5 |
-| `wall_us` | `CLOCK_MONOTONIC` across fork→wait4 | `timeMs`, the wall backstop, `setupOverheadMs` |
+| `maxrss_kb` | `ru_maxrss` (KB on Linux) | `RunMeasurement.maxRssKb` → `memKb`; the ladder's step 5 (`OOM`) in `src/verdict` |
+| `wall_us` | `CLOCK_MONOTONIC` across fork→wait4 | `RunMeasurement.jailWallMs` → `timeMs`; the wall backstop (step 4), `setupOverheadMs` |
 
 `rusage` from `wait4()` covers nsjail **and every descendant nsjail reaped** — which is the jailed
 program — so `cpu_us` is the submission's real CPU cost and `maxrss_kb` its real peak, with nsjail's
@@ -86,18 +86,21 @@ own few MB included in the latter.
 
 **No report is written when the judge force-kills the process group** (the last-resort SIGKILL timer
 or the absolute deadline), because the reporter is in that group. `runSandboxed` tracks that with
-`forcedKill` and does not call it a judge fault; those runs report `cpuMs: 0` and are already
-classified `TO` by ladder step 1. A missing report on any *other* path sets `sandboxError`.
+`forcedKill` and does not call it a judge fault; those measurements carry no `cpuMs`/`maxRssKb`
+(`nodeTimerFired` is set) and the ladder's step 1 grades them `TO`. A missing report on any *other*
+path is `{ok: false, sandboxError}`.
 
-# `classifyKill`, in order
+# The kill ladder, in order
 
-`killedBy` is `"TO" | "OOM" | "SIG" | null`. The ladder short-circuits top to bottom:
+The kill class — `TO | OOM | SIG | null` — is decided by `gradeCase` in `src/verdict`, **not in this
+file**, from the measurement and the limits the route enforced. The ladder short-circuits top to
+bottom:
 
 1. Node's last-resort SIGKILL timer fired → `TO` (a stuck nsjail or kernel, not a runaway program)
 2. `cpuMs >= timeLimitMs` → `TO` — **the authoritative gate**
 3. clean exit (`0`, no signal) → `null`; never downgrade a finished program on wall noise
 4. jail wall `>= 3 * timeLimitMs` → `TO` (blocked on syscalls without burning CPU)
-5. peak RSS `>= MEM_LIMIT_RSS_RATIO` (0.98) of the cap → `OOM`
+5. peak RSS `>= 0.98` of the cap (`MEM_LIMIT_RSS_RATIO`, the one copy, in `src/verdict`) → `OOM`
 6. nsjail's `128 + WTERMSIG` status: SIGXCPU (24) → `TO`; SIGKILL (9) with jail wall already past the
    budget → `TO`; anything else → `SIG`
 7. a signal on the runner itself → `SIG`

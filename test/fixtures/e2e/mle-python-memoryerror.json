@@ -3,7 +3,7 @@
   "endpoint": "/submit",
   "request": {
     "language": "python3",
-    "code": "# The CPython twin of refuse-allocation.cpp: 600 MB under a 256 MB cap\n# raises MemoryError, which is the other allocation signature MLE rule 3\n# recognises.\nb = bytearray(600 << 20)\nprint(len(b))\n",
+    "code": "# The CPython twin of refuse-allocation.cpp: 600 MB under a 256 MB cap\n# raises MemoryError, which is the other signature the allocation-signature\n# MLE rule recognises.\nb = bytearray(600 << 20)\nprint(len(b))\n",
     "input": [
       "1\n"
     ],

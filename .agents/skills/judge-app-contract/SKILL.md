@@ -47,16 +47,16 @@ Response, HTTP **200**:
 |---|---|---|
 | `index` | `number` | 0-based; `results` is sorted by it |
 | `exitCode` | `number \| null` | `null` when the sandbox never got a code |
-| `passed` | `boolean` | `exitCode === 0 && killedBy === null` **and** checker accepted / `compare` matched |
+| `passed` | `boolean` | the run finished cleanly (exit 0, no kill class) **and** checker accepted / `compare` matched |
 | `expected` | `string` | echoed from the request |
 | `received` | `string` | same value as `stdout` |
 | `stderr` | `string` | the child's real stderr, byte-clean |
 | `stdout` | `string` | |
-| `timedOut` | `boolean` | `killedBy === "TO"` |
+| `timedOut` | `boolean` | the verdict ladder's kill class is `TO` |
 | `verdict` | `"AC"\|"WA"\|"TLE"\|"MLE"\|"RE"\|"CE"\|"IE"` | `CE` is declared and never produced |
-| `timeMs` | `number` | wall, from nsjail; `0` if the log did not parse |
-| `cpuMs` | `number` | the TLE-authoritative measure; `0` if the log did not parse |
-| `memKb` | `number` | peak RSS; `0` if the log did not parse |
+| `timeMs` | `number` | wall, from the jail runner; parent-measured when no report survived |
+| `cpuMs` | `number` | the TLE-authoritative measure; `0` only when no report survived (a force-killed run) |
+| `memKb` | `number` | peak RSS of the jail tree; `0` only when no report survived |
 | `checkerMessage` | `string?` | **key omitted entirely** when there is no checker or it said nothing |
 
 **A compile error is HTTP 200**, with `{summary:{0,0,0}, results:[], effectiveMemoryLimitMb,
@@ -74,7 +74,9 @@ is a problem-configuration fault that must never reach a student as their own co
 prints a JSON array of inputs to **stdout** and expected outputs to **stderr**, equal length.
 **A compile failure here is 400, not 200** — the opposite of `/submit`, and deliberate: a generator
 is admin input, not a student's. `language` is validated (`cpp`/`cpp14`/`cpp17` only) and then
-ignored; compilation is always `-O2 -std=gnu++17`.
+ignored; compilation is always `-O2 -std=gnu++17`. A generator that exits non-zero is 400 with
+`error: "Generator exited with code N"`, plus ` (killed by the judge after the time limit)` or
+` (signal S)` when that is what happened; `wmoj-app` shows the string verbatim and does not parse it.
 
 ## `GET /health`
 

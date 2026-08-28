@@ -56,6 +56,9 @@ jobs:
       - run: npm run build
       - run: npm run typecheck
       - run: npm test
+      # The derived measurement fixtures are a function of the captured ones;
+      # this proves the committed files are that function's output.
+      - run: npx tsx test/tools/deriveMeasurements.ts --check
 
   image:
     # x86_64: the amd64 image runs natively here, so RLIMIT_AS and seccomp

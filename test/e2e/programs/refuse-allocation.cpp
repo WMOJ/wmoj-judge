@@ -1,7 +1,7 @@
 // Asks for 600 MB and touches every page. Under a real RLIMIT_AS the
 // allocation is REFUSED (not killed): std::bad_alloc escapes, terminate
 // aborts, and the process exits 134 with the allocation signature on
-// stderr that MLE rule 3 reads.
+// stderr that the allocation-signature MLE rule reads.
 #include <cstddef>
 #include <cstdio>
 

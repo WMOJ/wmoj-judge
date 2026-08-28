@@ -15,6 +15,17 @@ _Avoid_: test (ambiguous with the test suite)
 **Run**: One execution of a program inside the sandbox.
 _Avoid_: execution, spawn
 
+**Measurement**: The raw facts the sandbox reports about a run — exit status, signals, CPU, peak
+RSS, wall, captured streams. Carries no verdict.
+_Avoid_: result, SandboxResult
+
+**Kill class**: What ended a run — `TO`, `OOM`, `SIG`, or none — decided by the ladder in the
+verdict module from a measurement and the enforced limits. Internal to that module.
+_Avoid_: killedBy (as a public field)
+
+**Judgement**: Whether a run's output is acceptable, from a comparator or a checker.
+_Avoid_: comparison result, checker result
+
 **Verdict**: `AC | WA | TLE | MLE | RE | CE | IE`. `CE` is never produced by the judge; wmoj-app
 synthesises it from `compileError`.
 _Avoid_: status, outcome
@@ -35,3 +46,6 @@ or could not answer (`IE`). Never the student's.
 **Golden transcript**: A recorded `/submit` or `/generate-tests` exchange, replayed against a live
 container (`test/fixtures/e2e`).
 _Avoid_: snapshot
+
+**Measurement fixture**: A recorded measurement plus the `TestResult` it must grade to, replayed
+in-process (`test/fixtures/measurements`).
