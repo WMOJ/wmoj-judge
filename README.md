@@ -72,6 +72,31 @@ curl -s http://localhost:4001/health
 otherwise the package version plus the process start time. Poll it to tell a new build from an old
 one. `seccomp` is `enforced` or `disabled`.
 
+## Tests
+
+Three gates run on every change, and CI runs them all on every push:
+
+```bash
+npm run build       # tsc → dist/ (src/ only)
+npm run typecheck   # tsc over src/ AND test/ — emits nothing
+npm test            # node:test unit suite in test/unit — no container needed
+```
+
+`npm test` needs Node 21 or newer (the test runner's glob form). The unit suite covers the pure
+modules only; anything that touches nsjail is covered by the end-to-end golden transcripts in
+`test/fixtures/e2e`, which replay real `/submit` and `/generate-tests` exchanges against a running
+judge:
+
+```bash
+JUDGE_URL=http://localhost:4001 JUDGE_SHARED_SECRET=dev-local-secret npm run test:e2e
+```
+
+On arm64 the replay skips, by name, the fixtures that need a real `RLIMIT_AS` or the seccomp filter
+(see "Running on arm64"); CI replays every one of them on an amd64 kernel, so a verdict-affecting
+change is not verified until CI is green. The fixtures themselves are captured on that same runner
+(`npm run capture:e2e`, the `capture-e2e` workflow job) and reviewed by a human before they are
+committed.
+
 ## Grade something
 
 The auth header is `X-Judge-Token`, not `Authorization`.
@@ -163,7 +188,11 @@ mode a completely missing token is accepted, so a secret mismatch stays hidden u
 
 | Command | Does |
 |---|---|
-| `npm run build` | Compile TypeScript to `dist/`. Also the only typecheck. |
+| `npm run build` | Compile TypeScript to `dist/`; typechecks `src/`. |
+| `npm run typecheck` | Typecheck `src/` and `test/` together; emits nothing. |
+| `npm test` | Unit suite (`node:test`, Node 21+). |
+| `npm run test:e2e` | Replay the golden transcripts against a running judge (`JUDGE_URL`, `JUDGE_SHARED_SECRET`). |
+| `npm run capture:e2e` | Re-record the golden transcripts; run on an amd64 kernel and review before committing. |
 | `npm run dev` | Hot-reloading dev server on :4001. Linux only, and needs `NSJAIL_BIN` and `SECCOMP_POLICY` pointed at real files. |
 | `npm run start` | Run the build. |
 
@@ -193,7 +222,8 @@ Contributions are genuinely welcome. This project is built and maintained by hig
 and outside help makes it better. Language support, performance work, better error messages and docs
 are all useful, and small PRs are perfectly good ones.
 
-Fork it, branch off `main`, and make sure `npm run build` is clean before pushing. Because this
+Fork it, branch off `main`, and make sure `npm run build`, `npm run typecheck` and `npm test` are clean
+before pushing; CI replays the end-to-end transcripts on an amd64 runner. Because this
 service runs untrusted code, changes to the sandbox, the seccomp policy or the Dockerfile need a
 clear explanation in the PR of what changes and why.
 

@@ -144,6 +144,19 @@ curl -s -X POST http://localhost:4001/submit \
 Change `print(a+b)` to `print(a-b)` and both cases come back `WA`. Full request and response schemas
 live in **`judge-app-contract`**; read it before relying on any field.
 
+The proper smoke test after a boot is the golden-transcript replay:
+
+```bash
+JUDGE_URL=http://localhost:4001 JUDGE_SHARED_SECRET=dev-local-secret npm run test:e2e
+```
+
+It re-POSTs every recorded `/submit` and `/generate-tests` exchange in `test/fixtures/e2e` and diffs
+the answers. On arm64 the fixtures tagged `rlimit_as` or `seccomp` (the MLE ones and the
+seccomp-denied socket) are skipped **by name**, because emulation cannot reproduce them — CI replays
+those on an amd64 kernel. Start the container with `-e RATE_LIMIT_MAX=1000` if you capture and
+replay within the same minute: the default 60/min bucket is shared by both gated routes and a
+capture plus a replay is 75 requests.
+
 Measured on an M1 Pro under emulation, for calibration: python3 ~210 ms/case, pypy3 ~220 ms/case, a
 `bits/stdc++.h` C++ submission ~6.7 s end to end (nearly all of it g++). Give `timeLimit` plenty of
 headroom locally and **never calibrate a problem's real time limit here**.

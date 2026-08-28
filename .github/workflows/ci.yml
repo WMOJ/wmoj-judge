@@ -1,0 +1,136 @@
+# CI for wmoj-judge. Three things it exists to prove that a laptop cannot:
+#
+#   1. The unit suite and both tsc projects are clean on the Node the tests
+#      are written for (22; the runtime image stays node:20 and never runs
+#      the tests).
+#   2. The amd64 image boots on an amd64 kernel with seccomp ENFORCED, and
+#      the end-to-end golden transcripts in test/fixtures/e2e replay
+#      identically against it. RLIMIT_AS and the syscall filter are only
+#      real on an amd64 kernel — under QEMU on an arm64 laptop the replay
+#      has to skip every MLE and seccomp fixture — so this job is the only
+#      place a verdict-affecting change is actually verified.
+#   3. A fresh capture of those goldens can be produced on the same runner
+#      and downloaded as an artifact, which is how the committed fixtures
+#      were made in the first place.
+#
+# ubuntu-latest runners are x86_64, so the amd64 image runs natively. Docker's
+# default seccomp profile permits seccomp(2)/prctl(PR_SET_SECCOMP) inside a
+# container, which is what nsjail needs and what Render provides; if nsjail
+# ever fails to install the filter on a runner image, the first thing to try
+# is `--security-opt seccomp=unconfined` on the `docker run` lines below, and
+# the reason goes in this comment.
+#
+# The image is built once (BuildKit's GHA cache means only the first run pays
+# for compiling nsjail from source) and handed to the container jobs as an
+# artifact, so every job sees the same bytes.
+#
+# RATE_LIMIT_MAX=1000: the judge allows 60 requests/min per (ip, token)
+# across both gated routes. One replay is 38 requests and one capture 37,
+# so either alone fits, but a retry or a capture-then-replay in the same
+# window trips the limiter and every later transcript fails with a 429.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm test
+
+  image:
+    # x86_64: the amd64 image runs natively here, so RLIMIT_AS and seccomp
+    # are real.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: wmoj-judge:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - run: docker save wmoj-judge:ci | gzip > image.tgz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image
+          path: image.tgz
+          retention-days: 1
+
+  e2e:
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+      - run: docker load < image.tgz
+      - name: boot the judge with seccomp enforced
+        run: |
+          docker run -d --name judge -p 4001:4001 \
+            -e JUDGE_SHARED_SECRET=ci -e AUTH_STRICT=true -e RATE_LIMIT_MAX=1000 wmoj-judge:ci
+          for i in $(seq 1 60); do curl -sf localhost:4001/health && break; sleep 1; done
+          curl -sf localhost:4001/health | grep -q '"seccomp":"enforced"'
+      - run: npm ci
+      - run: JUDGE_URL=http://localhost:4001 JUDGE_SHARED_SECRET=ci npm run test:e2e
+      - if: failure()
+        run: docker logs judge
+
+  # A fresh capture of the goldens, uploaded as an artifact for a human to
+  # review against Appendix A of the plan and commit. It runs on
+  # workflow_dispatch and also on pull requests: a workflow_dispatch can only
+  # be triggered once the workflow file exists on the default branch, and the
+  # baseline fixtures had to be captured from a branch before that was true.
+  # It never fails the run on its own — it records, it does not judge.
+  capture-e2e:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+      - run: docker load < image.tgz
+      - name: boot the judge with seccomp enforced
+        run: |
+          docker run -d --name judge -p 4001:4001 \
+            -e JUDGE_SHARED_SECRET=ci -e AUTH_STRICT=true -e RATE_LIMIT_MAX=1000 wmoj-judge:ci
+          for i in $(seq 1 60); do curl -sf localhost:4001/health && break; sleep 1; done
+          curl -sf localhost:4001/health | grep -q '"seccomp":"enforced"'
+      - run: npm ci
+      - run: JUDGE_URL=http://localhost:4001 JUDGE_SHARED_SECRET=ci npm run capture:e2e
+      - uses: actions/upload-artifact@v4
+        with:
+          name: e2e-fixtures
+          path: test/fixtures/e2e/
+      - if: failure()
+        run: docker logs judge

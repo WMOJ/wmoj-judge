@@ -9,6 +9,10 @@
   },
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "LOG_LEVEL=silent node --import tsx --test \"test/unit/**/*.test.ts\"",
+    "test:e2e": "node --import tsx --test \"test/e2e/**/*.test.ts\"",
+    "capture:e2e": "tsx test/e2e/capture.ts",
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts"
   },

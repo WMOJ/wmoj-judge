@@ -19,16 +19,20 @@ size caps, the compile cache, CPU-time TLE — follows from that host, not from 
 
 ```bash
 npm ci
-npm run build    # tsc → dist/ — builds AND typechecks; the ONLY automated gate
-npm run dev      # tsx watch (Linux only)
+npm run build       # tsc → dist/ — builds AND typechecks src/
+npm run typecheck   # tsc over src/ AND test/ (tsconfig.test.json), emits nothing
+npm test            # node:test unit suite in test/unit — pure modules, no container
+npm run test:e2e    # replays test/fixtures/e2e against JUDGE_URL; needs a running judge
+npm run dev         # tsx watch (Linux only)
 docker build --platform=linux/amd64 -t wmoj-judge .
 docker run --rm -p 4001:4001 -e JUDGE_SHARED_SECRET=… -e AUTH_STRICT=true wmoj-judge
 ```
 
-**No lint, no test, no format script; no CI, zero test files.** Never claim otherwise. `tsc` runs
-with `strict` + `noUncheckedIndexedAccess`, so a clean build is a real bar — behavioural changes must
-be checked by hand against a running container. On arm64 that needs `UNSAFE_DISABLE_SECCOMP=true`
-plus `NODE_ENV=development`, and emulation leaves `RLIMIT_AS` unenforced → **`run-judge-locally`**.
+**No lint, no format script.** Three gates: `build`, `typecheck`, `test`; CI runs them plus the e2e
+goldens against the amd64 image on every push. MLE and seccomp behaviour is only exercisable on an
+amd64 kernel — on arm64 the e2e replay skips those fixtures (→ **`run-judge-locally`**) — so **a
+verdict-affecting change is not verified until CI is green.** Tests live in `test/`, outside
+`rootDir`, so they can never ship in `dist/`.
 
 - **Won't run natively on macOS** — nsjail is Linux-only. Use Docker.
 - **`.env.local` is intentionally not loaded** (no `dotenv`, no `--env-file`); local runs fall back
@@ -120,8 +124,7 @@ uts, cgroup), chroot, `--user`/`--group`, cgroups.
   *run* step goes through nsjail.
 - **Resource accounting comes from `wmoj-jailrun`**, a small C wrapper built into the image that
   execs nsjail, `wait4()`s it with `rusage`, and reports over a `FD_CLOEXEC` fd the jailed program
-  cannot reach. nsjail 3.3 emits **no** rusage in its log — the previous log-scraper matched nothing,
-  so `cpuMs`/`memKb` were `0` on every run and the CPU-time TLE gate never once fired.
+  cannot reach — nsjail 3.3 emits **no** rusage.
 - `tini` is PID 1, so orphaned descendants are reaped instead of accumulating against the shared UID.
 - Every flag, rlimit, and seccomp rule prevents one specific failure → **`sandbox-changes`**.
 
@@ -146,8 +149,7 @@ load-bearing: TLE → MLE → RE → IE → WA/AC**, with MLE tested *before* th
 
 `languages.json` is the source of truth: `python3`, `pypy3` (384 MB default), `cpp14/17/20/23`
 (`g++ -O2 -std=c++NN`). Legacy aliases `python`→`python3` and `cpp`→`cpp17` are still accepted for the
-wmoj-app cutover; Java was removed. Adding one touches eight places, one of which the compiler does
-**not** check for you → **`add-language`**.
+wmoj-app cutover. Adding one touches eight places, one unchecked by `tsc` → **`add-language`**.
 
 ## Concurrency & config
 
@@ -225,8 +227,7 @@ both sides (constant-time compare; a length mismatch short-circuits before `timi
 ## Maintenance
 
 Keep this file current, and keep it at or under **250 lines**. AGENTS.md is updated in the same
-commit as the code — `88640cd` shipped the checkers feature and its AGENTS.md changes together — and
-letting it go stale is leaving the work unfinished.
+commit as the code, and letting it go stale is leaving the work unfinished.
 
 ⚠️ **Maintenance here is ZERO-SUM.** The line budget is the point, not an accident: a file nobody
 finishes reading is a file that does not guide anything. So the test for whether something belongs
