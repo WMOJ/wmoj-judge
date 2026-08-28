@@ -52,6 +52,11 @@ floor) || 256, ceiling)))`.
 
 ## Machinery
 
+**Test-data budget**: The caps on how much test data one request may carry, and the one walk
+(`src/budget`) that decides whether a body fits — `/submit` 413s on it and `/generate-tests` 400s on
+it, from the same answer.
+_Avoid_: request caps (for the decision; `requestCaps` is only the middleware)
+
 **Drain**: The 25 s window after `SIGTERM` in which routes 503 and in-flight work finishes.
 
 **Liveness**: Whether the judge can grade correctly right now — one list of checks in

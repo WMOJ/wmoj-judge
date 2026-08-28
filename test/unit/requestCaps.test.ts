@@ -1,13 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Request, Response, NextFunction } from "express";
+import { requestCaps } from "../../src/middleware/requestCaps";
 import {
-  requestCaps,
   MAX_INPUT_CASES,
   MAX_INPUT_BYTES_PER_CASE,
   MAX_OUTPUT_BYTES_PER_CASE,
   MAX_TOTAL_REQUEST_BYTES,
-} from "../../src/middleware/requestCaps";
+} from "../../src/budget";
 
 /**
  * The 413 bodies this middleware sends are cross-repo contract:

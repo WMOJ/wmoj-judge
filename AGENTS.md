@@ -90,13 +90,13 @@ once ran only at boot) every 5 min; boot runs all five. `200 {status,version,sec
 
 ## Size caps and the memory clamp
 
-Enforced in `src/middleware/requestCaps.ts` (413 on violation) by UTF-8 `Buffer.byteLength`: **200**
-cases, **1,000,000** bytes per input and per expected output, 100,000 per source and per checker, and
-an **aggregate** `MAX_TOTAL_REQUEST_BYTES` = 16 MiB over `code + checker + Σinput + Σoutput`.
-`JSON_BODY_LIMIT` is `"32mb"`, exactly 2× the aggregate, and lives in the same module so the parser
-limit can never again sit *below* the largest legal payload — it used to, by 1.53×, so a legal
-max-size body got Express's HTML 413. Changing any cap means changing `wmoj-app`'s `judge.sh`
-constants in the same commit.
+Decided in `src/budget` (one walk, UTF-8 `Buffer.byteLength`) and enforced by `requestCaps` (413) and
+`/generate-tests` (400) from that same walk: **200** cases, **1,000,000** bytes per input and per
+expected output, 100,000 per source and per checker, and an **aggregate** `MAX_TOTAL_REQUEST_BYTES` =
+16 MiB over `code + checker + Σinput + Σoutput`. `JSON_BODY_LIMIT` is `"32mb"`, 2× the aggregate, in
+the same module, asserted by `test/unit/budget.test.ts`, so the parser limit can never again sit
+*below* the largest legal payload — it used to, by 1.53×, so a legal max-size body got Express's
+HTML 413. Changing any cap means changing `wmoj-app`'s `judge.sh` constants in the same commit.
 
 Every submission's cap is clamped to `min(requested, HOST_MEMORY_CEILING_MB)` — **384**, not 512:
 Node and the compile cache share the same 512 MB, so a ceiling equal to the box means the OOM-killer

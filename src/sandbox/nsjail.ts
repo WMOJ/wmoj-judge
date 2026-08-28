@@ -59,9 +59,11 @@ const ABSOLUTE_DEADLINE_SLACK_MS = 15_000;
  * two more copies of it -- which either OOM-killed the whole service or
  * threw `RangeError` past `MAX_STRING_LENGTH`.
  *
- * 1 MiB of stdout sits just above `requestCaps`' 1,000,000-byte cap on
- * a single expected output, so for `/submit` a truncated run is one
- * that could not have been `AC` regardless. `/generate-tests`, whose
+ * 1 MiB of stdout sits just above `MAX_OUTPUT_BYTES_PER_CASE`, the
+ * budget's 1,000,000-byte cap on a single expected output, so for
+ * `/submit` a truncated run is one that could not have been `AC`
+ * regardless; `test/unit/budget.test.ts` asserts that ordering so the
+ * two constants cannot drift past each other. `/generate-tests`, whose
  * stdout IS the payload, must raise `maxStdoutBytes` deliberately.
  */
 export const DEFAULT_MAX_STDOUT_BYTES = 1024 * 1024;

@@ -11,11 +11,12 @@ import { logger } from "../util/logger";
 import { isDraining } from "../util/shutdown";
 import {
   MAX_INPUT_BYTES_PER_CASE,
-  MAX_OUTPUT_BYTES_PER_CASE,
   MAX_INPUT_CASES,
-  MAX_TOTAL_REQUEST_BYTES,
-  formatCap,
-} from "../middleware/requestCaps";
+  SUBMISSION_SOURCE_HEADROOM_BYTES,
+  describeViolation,
+  fitsTestDataBudget,
+  type BudgetViolation,
+} from "../budget";
 
 /**
  * Looser resource limits for the generator: it runs trusted admin code
@@ -67,22 +68,39 @@ const ACCEPTED_LANGUAGES_TEXT = ACCEPTED_LANGUAGES.join("/");
  * for data the judge itself handed the admin. The judge knows at
  * generation time; it should say so then.
  *
- * Every bound here is imported from `middleware/requestCaps` rather
- * than restated, so the caps this route enforces on generated data and
- * the caps `/submit` will later enforce on that same data cannot drift
- * apart. A generator that produced output this route accepted but
- * `/submit` rejected would strand an admin with test data the judge
- * refuses to grade.
+ * The decision is `src/budget`'s `fitsTestDataBudget` — the SAME walk
+ * `requestCaps` runs on the way into `/submit`, not a second copy of it.
+ * The copy that used to live here measured `output` against the input
+ * cap; equal today, so it changed nothing, right up until one of them
+ * moved. This route reserves `SUBMISSION_SOURCE_HEADROOM_BYTES` out of
+ * the aggregate so the data it hands back can always be submitted with
+ * any legal program and checker against it.
  */
 
 /**
- * Bytes reserved out of `MAX_TOTAL_REQUEST_BYTES` for the parts of a
- * future `/submit` body that are *not* test data: the student's source
- * (100 KB) plus an optional custom checker (100 KB). Generated data
- * that fills the whole aggregate budget would leave no room for them
- * and 413 on the first real submission.
+ * Render a budget violation as this route's 400. The wording for the
+ * count and per-case kinds is the canonical one `/submit`'s 413 uses,
+ * so an admin reading either sees the same complaint; the aggregate is
+ * re-phrased in this route's terms (its `limit` and `bytes` exclude the
+ * reserved headroom, which is not the generator's data), and `count` is
+ * carried for the count kind as it always was.
  */
-const SUBMISSION_SOURCE_HEADROOM_BYTES = 200_000;
+function budgetViolationBody(v: BudgetViolation): Record<string, unknown> {
+  const error = "generated test data exceeds the limits /submit enforces";
+  switch (v.kind) {
+    case "count":
+      return { error, reason: describeViolation(v), limit: v.limit, count: v.count };
+    case "per-case":
+      return { error, reason: describeViolation(v), limit: v.limit };
+    case "aggregate":
+      return {
+        error,
+        reason: "total test data leaves no room for a submission's source",
+        limit: v.limit - SUBMISSION_SOURCE_HEADROOM_BYTES,
+        bytes: v.bytes - SUBMISSION_SOURCE_HEADROOM_BYTES,
+      };
+  }
+}
 
 /** The generator's source and binary inside the workdir. */
 const GENERATOR_SOURCE_FILENAME = "Generator.cpp";
@@ -311,52 +329,9 @@ generateTestsRouter.post("/", async (req: Request, res: Response) => {
     // A size complaint deliberately does NOT echo inputJson/outputJson
     // the way the parse failures above do: those need the raw text to
     // be diagnosable, this one is already too big by definition.
-    if (input.length > MAX_INPUT_CASES) {
-      res.status(400).json({
-        error: "generated test data exceeds the limits /submit enforces",
-        reason: `too many test cases (max ${MAX_INPUT_CASES})`,
-        limit: MAX_INPUT_CASES,
-        count: input.length,
-      });
-      return;
-    }
-
-    let totalBytes = 0;
-    for (let i = 0; i < input.length; i += 1) {
-      const inBytes = Buffer.byteLength(input[i] ?? "", "utf8");
-      const outBytes = Buffer.byteLength(output[i] ?? "", "utf8");
-      if (inBytes > MAX_INPUT_BYTES_PER_CASE) {
-        res.status(400).json({
-          error: "generated test data exceeds the limits /submit enforces",
-          reason: `input[${i}] exceeds ${formatCap(MAX_INPUT_BYTES_PER_CASE)}`,
-          limit: MAX_INPUT_BYTES_PER_CASE,
-        });
-        return;
-      }
-      // The OUTPUT cap, not the input one: this block's whole purpose is to
-      // reject here exactly what /submit would reject, and requestCaps measures
-      // `output` against MAX_OUTPUT_BYTES_PER_CASE. They are equal today, so
-      // using the wrong one changed nothing — right up until one of them moves.
-      if (outBytes > MAX_OUTPUT_BYTES_PER_CASE) {
-        res.status(400).json({
-          error: "generated test data exceeds the limits /submit enforces",
-          reason: `output[${i}] exceeds ${formatCap(MAX_OUTPUT_BYTES_PER_CASE)}`,
-          limit: MAX_OUTPUT_BYTES_PER_CASE,
-        });
-        return;
-      }
-      totalBytes += inBytes + outBytes;
-    }
-
-    const aggregateBudget =
-      MAX_TOTAL_REQUEST_BYTES - SUBMISSION_SOURCE_HEADROOM_BYTES;
-    if (totalBytes > aggregateBudget) {
-      res.status(400).json({
-        error: "generated test data exceeds the limits /submit enforces",
-        reason: "total test data leaves no room for a submission's source",
-        limit: aggregateBudget,
-        bytes: totalBytes,
-      });
+    const budget = fitsTestDataBudget(input, output, SUBMISSION_SOURCE_HEADROOM_BYTES);
+    if (!budget.ok) {
+      res.status(400).json(budgetViolationBody(budget.violation));
       return;
     }
 

@@ -6,7 +6,8 @@ import { startupSweep } from "./util/workdir";
 import { installShutdownHandlers, enterRequest, exitRequest } from "./util/shutdown";
 import { authMiddleware } from "./middleware/auth";
 import { createRateLimiter } from "./middleware/rateLimit";
-import { requestCaps, JSON_BODY_LIMIT } from "./middleware/requestCaps";
+import { requestCaps } from "./middleware/requestCaps";
+import { JSON_BODY_LIMIT } from "./budget";
 import { submitRouter } from "./routes/submit";
 import { generateTestsRouter } from "./routes/generateTests";
 import { healthRouter } from "./routes/health";
@@ -69,9 +70,10 @@ async function main(): Promise<void> {
   //      of inflation first. `/health` is a GET and needs no parser.
   //   4. requestCaps, which needs `req.body` parsed to measure it.
   //
-  // JSON_BODY_LIMIT and the caps live in the same module so the parser
-  // limit can never again drift *below* the largest payload the caps
-  // accept — see the comment on JSON_BODY_LIMIT for what that costs.
+  // JSON_BODY_LIMIT and the caps live in the same module (`src/budget`)
+  // so the parser limit can never again drift *below* the largest payload
+  // the caps accept — see the comment on JSON_BODY_LIMIT for what that
+  // costs, and `test/unit/budget.test.ts` for the assertion that holds it.
   //
   // One limiter and one parser instance are shared by both mounts, so
   // the documented "60/min across both gated routes" budget is one

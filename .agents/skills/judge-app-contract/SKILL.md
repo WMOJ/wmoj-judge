@@ -66,7 +66,9 @@ is a problem-configuration fault that must never reach a student as their own co
 `wmoj-app` branches on `checkerError` **before** `compileError` and stores no submission row for it.
 
 4xx/5xx means the request or the judge is wrong, never the user's code. `413` comes from
-`requestCaps` with a `reason`; `401` from strict auth; `503` while draining.
+`requestCaps` with a `reason`, decided by `src/budget`'s walk — the same one behind `/generate-tests`'s
+"exceeds the limits /submit enforces" 400, so the two cannot disagree; `401` from strict auth; `503`
+while draining.
 
 ## `POST /generate-tests`
 
@@ -111,7 +113,7 @@ a Render dashboard change, in that order.
 miss in that repo — grep the twin path every time.
 
 There is a fifth client outside the app: **`wmoj-app/.agents/skills/add-problem/scripts/judge.sh`**,
-the CLI used to author problems. It hardcodes this judge's caps (`MAX_CASES=200`,
+the CLI used to author problems. It hardcodes this judge's caps from `src/budget` (`MAX_CASES=200`,
 `MAX_BYTES_PER_CASE=1000000`, `MAX_CODE_BYTES=100000`) and branches on `compileError`, `checkerError`,
 and `effectiveMemoryLimitMb`. **Changing a cap means editing that script too**, or every problem
 authored through the skill is validated against stale numbers.
