@@ -37,6 +37,19 @@ _Avoid_: internal error (that is `IE`)
 **Problem fault**: A problem-configuration failure — the checker will not compile (`checkerError`)
 or could not answer (`IE`). Never the student's.
 
+**Language spec**: Everything the judge knows about one language, derived from its `languages.json`
+entry by `src/languages` — filename, compile line, artifacts, run line, memory floor.
+_Avoid_: executor
+
+**Memory floor**: The least memory a language is ever given (`memoryFloorMb`; PyPy's 384 MB),
+applied as `max(requested, floor)`.
+_Avoid_: language default
+
+**Host ceiling**: `HOST_MEMORY_CEILING_MB` (384) — the most any submission is given on this box.
+
+**Effective limit**: The cap actually enforced and reported: `max(1, floor(min(max(requested,
+floor) || 256, ceiling)))`.
+
 ## Machinery
 
 **Drain**: The 25 s window after `SIGTERM` in which routes 503 and in-flight work finishes.

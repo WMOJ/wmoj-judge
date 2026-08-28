@@ -1,11 +1,11 @@
 import { Router, type Request, type Response } from "express";
 import { promises as fs } from "fs";
+import * as path from "path";
 import type {
   SubmitRequest,
   SubmitResponse,
   TestResult,
   CompareMode,
-  Language,
 } from "../types";
 import { config } from "../config";
 import { submitSemaphore } from "../queue/globalSemaphore";
@@ -15,23 +15,13 @@ import { runSandboxed } from "../sandbox/nsjail";
 import { gradeCase, type CaseLimits, type Judge } from "../verdict";
 import { acquireUid, releaseUid } from "../queue/uidPoolSingleton";
 import { createWorkdir, cleanupWorkdir, isRootNode } from "../util/workdir";
-import { executorFor } from "../executors";
+import { isLanguage, languageSpec } from "../languages";
+import { buildChildEnv } from "../sandbox/minimalEnv";
+import { runCompile, type CompileResult } from "../util/compile";
 import { compare } from "../compare";
 import { compileChecker, runChecker } from "../checker";
 import { logger } from "../util/logger";
 import { isDraining } from "../util/shutdown";
-import languagesJson from "../../languages.json";
-
-const ALL_LANGUAGES: readonly (Language | "python" | "cpp")[] = [
-  "python3",
-  "pypy3",
-  "cpp14",
-  "cpp17",
-  "cpp20",
-  "cpp23",
-  "python",
-  "cpp",
-];
 
 const ALL_COMPARE_MODES: readonly CompareMode[] = [
   "exact",
@@ -54,7 +44,12 @@ function validateSubmit(body: unknown): { ok: true; value: SubmitRequest } | { o
   if (typeof b.language !== "string") {
     return { ok: false, error: "Invalid payload: 'language' must be a string" };
   }
-  if (!ALL_LANGUAGES.includes(b.language as Language | "python" | "cpp")) {
+  // Membership in `languages.json` IS the accepted set — the route no
+  // longer keeps its own list to forget to update, and the legacy
+  // `python`/`cpp` codes are gone with it. Both known wmoj-app call sites
+  // send canonical codes; `/generate-tests` keeps accepting bare `cpp`
+  // because `judge.sh` still sends it there.
+  if (!isLanguage(b.language)) {
     return { ok: false, error: `Unsupported language: ${b.language}` };
   }
   if (typeof b.code !== "string") {
@@ -104,7 +99,7 @@ function validateSubmit(body: unknown): { ok: true; value: SubmitRequest } | { o
   return {
     ok: true,
     value: {
-      language: b.language as Language | "python" | "cpp",
+      language: b.language,
       code: b.code,
       input: b.input as string[],
       output: b.output as string[],
@@ -114,91 +109,6 @@ function validateSubmit(body: unknown): { ok: true; value: SubmitRequest } | { o
       checker,
     },
   };
-}
-
-// Process-lifetime flags so legacy-code warnings fire at most once per
-// language per judge instance rather than on every request.
-let warnedLegacyPython = false;
-let warnedLegacyCpp = false;
-
-/**
- * Map a legacy language code to its current equivalent, warning once per
- * process per alias.
- *
- * Legacy cutover mapping:
- *   "python" -> "python3"
- *   "cpp"    -> "cpp17"
- *
- * The warning lives HERE, not in `executorFor`, because this is the only
- * function that ever sees the raw request value. `executorFor` used to
- * own it and its legacy branches were unreachable: this call runs first
- * and hands it the already-normalised code, so the deprecation warning
- * had never once been emitted — while this file, `executors/index.ts`
- * and the `add-language` skill all documented it as firing. Nothing told
- * anyone whether the wmoj-app cutover was finished, and `AGENTS.md`
- * lists removing the aliases as a decision that needs that answer.
- */
-function normalizeLanguage(
-  lang: Language | "python" | "cpp",
-): Language {
-  if (lang === "python") {
-    if (!warnedLegacyPython) {
-      warnedLegacyPython = true;
-      logger.warn(
-        'deprecation: language code "python" is legacy; map to "python3"',
-      );
-    }
-    return "python3";
-  }
-  if (lang === "cpp") {
-    if (!warnedLegacyCpp) {
-      warnedLegacyCpp = true;
-      logger.warn(
-        'deprecation: language code "cpp" is legacy; map to "cpp17"',
-      );
-    }
-    return "cpp17";
-  }
-  return lang;
-}
-
-/**
- * Return the compile argv for a canonical language, or an empty array for
- * interpreted languages (python3, pypy3) which have no compile step. Used
- * as input to the compile-cache key so artifacts are invalidated whenever
- * compiler flags change — and so python/pypy submissions with identical
- * source share a cache entry.
- */
-function compileArgvFor(language: Language): readonly string[] {
-  const spec = languagesJson[language];
-  if (spec && spec.compile && Array.isArray(spec.compile.argv)) {
-    return spec.compile.argv;
-  }
-  return [];
-}
-
-/**
- * Per-language FLOOR on memoryLimitMb (e.g. pypy3 → 384) from
- * languages.json. Returns undefined when the entry doesn't set one.
- *
- * PyPy baseline RSS is ~60 MB vs CPython's ~14 MB, so a PyPy submission
- * under a 256 MB cap spends a quarter of its budget before running a
- * line of user code — which is why this knob exists.
- *
- * It is a floor rather than a default because a default never applied:
- * `wmoj-app` sends `problem.memory_limit || 256`, which is ALWAYS a
- * number even when the column is null or 0, and `judge.sh` takes
- * `memLimitMb` as a required positional argument. So `payload.memoryLimit
- * ?? languageMemoryDefaultMb(...)` short-circuited on its first term for
- * every request either client has ever made, and every PyPy submission
- * ran at the problem's cap. A PyPy solution that fits comfortably in
- * 256 MB of *user* data would hit `--rlimit_as 256`, raise `MemoryError`,
- * match the verdict module's allocation-failure signatures, and be graded
- * `MLE` while the equivalent CPython submission passed.
- */
-function languageMemoryDefaultMb(language: Language): number | undefined {
-  const spec = languagesJson[language] as { memoryLimitMb?: number };
-  return typeof spec.memoryLimitMb === "number" ? spec.memoryLimitMb : undefined;
 }
 
 /**
@@ -260,7 +170,7 @@ export const submitRouter: Router = Router();
 
 /**
  * POST /submit — main judging endpoint. Flow:
- *  1. validate payload  2. normalize legacy lang
+ *  1. validate payload  2. resolve the language spec
  *  3. acquire global semaphore slot  4. acquire UID + workdir
  *  5. check compile cache → compile if miss (compile fail → HTTP 200 with compileError)
  *  6. put artifact in cache
@@ -292,20 +202,23 @@ submitRouter.post("/", async (req: Request, res: Response) => {
   }
   const payload = validation.value;
 
-  const language = normalizeLanguage(payload.language);
+  const language = payload.language;
+  const spec = languageSpec(language);
   const compareMode: CompareMode = payload.compareMode ?? "trim-trailing";
   const checkerSource = payload.checker;
   const timeLimitMs = payload.timeLimit ?? 5000;
   // Requested memory cap: the LARGER of what the request asked for and
   // the language's floor (e.g. pypy3 → 384 MB), falling back to 256 MB
-  // when neither is set. `max` rather than `??` because both real
-  // clients always send a number, which made the language floor dead —
-  // see `languageMemoryDefaultMb`. What is actually applied to the
-  // sandbox is that value clamped to the host ceiling; it is reported
-  // back as `effectiveMemoryLimitMb`.
+  // when neither is set. `max` rather than `??` because both real clients
+  // always send a number — `wmoj-app` sends `problem.memory_limit || 256`
+  // and `judge.sh` takes `memLimitMb` as a required positional argument —
+  // so `payload.memoryLimit ?? floor` would short-circuit on its first
+  // term for every request either client has ever made, and every PyPy
+  // submission would run at the problem's cap. What is actually applied
+  // to the sandbox is that value clamped to the host ceiling; it is
+  // reported back as `effectiveMemoryLimitMb`.
   const requestedMemLimitMb =
-    Math.max(payload.memoryLimit ?? 0, languageMemoryDefaultMb(language) ?? 0) ||
-    256;
+    Math.max(payload.memoryLimit ?? 0, spec.memoryFloorMb ?? 0) || 256;
   const memLimitMb = effectiveMemLimitMb(
     requestedMemLimitMb,
     config.HOST_MEMORY_CEILING_MB,
@@ -337,25 +250,24 @@ submitRouter.post("/", async (req: Request, res: Response) => {
     let uid: number | null = null;
     let workDir: string | null = null;
     try {
-      const executor = executorFor(language);
-      const filename = executor.filename(payload.code);
-
       uid = await acquireUid();
       workDir = await createWorkdir(uid);
 
-      await executor.prepare(workDir, payload.code);
-      // The files the executor just wrote are owned by root; hand them to the pool UID.
+      await fs.writeFile(
+        path.join(workDir, spec.filename),
+        payload.code,
+        "utf8",
+      );
+      // The source we just wrote is owned by root; hand it to the pool UID.
       await chownTree(workDir, uid).catch((err) => {
         logger.warn({ err, workDir }, "submit: chown tree failed; continuing");
       });
 
-      const runCmd = executor.buildRunCommand(workDir, filename);
-
-      // Cache key covers (language, source, compile argv) per the plan.
-      // Interpreted languages (python3/pypy3) have no compile step, so we
-      // key on the empty array — matches the "no compile argv" semantics.
-      const compileArgv = compileArgvFor(language);
-      const key = cacheKey(language, payload.code, compileArgv);
+      // Cache key covers (language, source, compile argv). Interpreted
+      // languages (python3/pypy3) have no compile step, so they key on
+      // the empty array — matches the "no compile argv" semantics, and it
+      // is why two identical Python submissions share an entry.
+      const key = cacheKey(language, payload.code, spec.compileArgv ?? []);
 
       const cachedDir = await compileCache.get(key);
       if (cachedDir) {
@@ -363,7 +275,14 @@ submitRouter.post("/", async (req: Request, res: Response) => {
         await fs.cp(cachedDir, workDir, { recursive: true, force: true });
         await chownTree(workDir, uid).catch(() => {});
       } else {
-        const compileRes = await executor.compile(workDir);
+        // Compilation runs OUTSIDE nsjail: this is the judge transforming
+        // source, not executing user-provided behaviour. The child still
+        // gets the four-variable env from `buildChildEnv` so a malicious
+        // `#include` or pragma cannot read host variables.
+        const compileRes: CompileResult =
+          spec.compileArgv === null
+            ? { ok: true }
+            : await runCompile(spec.compileArgv, workDir, buildChildEnv());
         if (!compileRes.ok) {
           // Compile fail → HTTP 200 with compileError per contract.
           const response: SubmitResponse = {
@@ -437,7 +356,7 @@ submitRouter.post("/", async (req: Request, res: Response) => {
                 : rawInput + "\n";
             const expected = payload.output[i] ?? "";
             const outcome = await runSandboxed({
-              argv: runCmd.argv,
+              argv: [...spec.runArgv],
               cwd: workDir as string,
               label: `submit:case${String(i)}`,
               timeLimitMs,
@@ -588,7 +507,7 @@ submitRouter.post("/", async (req: Request, res: Response) => {
 
 /**
  * Recursively chown every entry under `dir` to `uid:uid`. Used after
- * `executor.prepare()` so the sandboxed pool UID can read/execute what
+ * the source is written so the sandboxed pool UID can read/execute what
  * Node (running as root) just wrote. No-op when Node is unprivileged
  * (see `isRootNode`).
  */

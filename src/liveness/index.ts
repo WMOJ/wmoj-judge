@@ -6,7 +6,7 @@ import { logger } from "../util/logger";
 import { buildChildEnv } from "../sandbox/minimalEnv";
 import { runSandboxed } from "../sandbox/nsjail";
 import { gradeCase } from "../verdict";
-import languages from "../../languages.json";
+import { toolchainProbes, type ToolchainProbe } from "../languages";
 
 /**
  * Liveness: whether the judge can grade correctly right now. One list of
@@ -220,39 +220,20 @@ export function createLiveness(
 const PROBE_TIMEOUT_MS = 2_000;
 
 /**
- * One toolchain probe: the binary to run and its version flag. Passes if
- * the process exits 0 within `PROBE_TIMEOUT_MS`.
+ * Run one toolchain probe, from `src/languages`: the binary a submission
+ * in that language actually executes, and the flag that makes it exit 0.
+ * Passes if it does so within `PROBE_TIMEOUT_MS`.
  *
  * The spawn takes its environment from `buildChildEnv()`, the same
  * four-variable allow-list user code gets, so a probe cannot pass on a
  * PATH or locale the real run would never see — and the judge's own
  * process.env never leaks into it. There is deliberately no per-probe env
- * knob: `buildChildEnv` builds one env for every language, and this
+ * knob: `buildChildEnv` builds one env for every language, and the probe
  * interface used to carry an `envLang` field advertising a
  * "language-flavoured env map" that the function ignored.
+ *
+ * Resolves to `null` (healthy) or a reason — never rejects.
  */
-interface ToolchainProbe {
-  readonly name: string;
-  readonly bin: string;
-  readonly args: readonly string[];
-}
-
-/**
- * The binaries come from `languages.json` rather than being spelled out
- * here, because that is what submissions actually execute. Probing a bare
- * `python3`/`g++` resolved through PATH, as this used to, means /health
- * can pass against a completely different binary from the absolute
- * `/usr/bin/...` path every run and compile uses.
- */
-function binOf(argv: readonly string[], what: string): string {
-  const bin = argv[0];
-  if (bin === undefined) {
-    throw new Error(`languages.json: ${what} has an empty argv`);
-  }
-  return bin;
-}
-
-/** Resolves to `null` (healthy) or a reason — never rejects. */
 function runToolchainProbe(p: ToolchainProbe): Promise<string | null> {
   return new Promise((resolve) => {
     let settled = false;
@@ -475,13 +456,18 @@ async function probeSandboxMeasures(): Promise<string | null> {
   return null;
 }
 
-/** The checks production runs, in one place. */
+/**
+ * The checks production runs, in one place.
+ *
+ * The toolchain list is `languages.json`'s, not a hand-picked one:
+ * `toolchainProbes()` returns one probe per distinct binary in the table
+ * (python3, pypy3 and g++ today — the four C++ entries share one
+ * compiler), so a language added to the JSON is probed at boot without
+ * anyone remembering to add it here, and a language removed stops being
+ * probed. The names are the ones `/health`'s `reason` has always used.
+ */
 export function productionChecks(): readonly LivenessCheck[] {
-  const probes: readonly ToolchainProbe[] = [
-    { name: "python3", bin: binOf(languages.python3.run.argv, "python3.run"), args: ["-V"] },
-    { name: "pypy3", bin: binOf(languages.pypy3.run.argv, "pypy3.run"), args: ["--version"] },
-    { name: "g++", bin: binOf(languages.cpp17.compile.argv, "cpp17.compile"), args: ["--version"] },
-  ];
+  const probes: readonly ToolchainProbe[] = toolchainProbes();
   return [
     ...probes.map(
       (p): LivenessCheck => ({ name: p.name, cadence: "fast", run: () => runToolchainProbe(p) }),
