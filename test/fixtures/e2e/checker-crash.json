@@ -1,0 +1,50 @@
+{
+  "name": "checker-crash",
+  "endpoint": "/submit",
+  "request": {
+    "language": "cpp17",
+    "code": "// Always answers \"1 2\", whatever the case. Right for one checker case and\n// wrong for the other -- which is the point: the checker, not the bytes,\n// decides.\n#include <cstdio>\n\nint main() {\n  std::printf(\"1 2\\n\");\n  return 0;\n}\n",
+    "input": [
+      "3 3\n1 2 5\n"
+    ],
+    "output": [
+      "1 2"
+    ],
+    "checker": "// A checker that dies by a signal. nsjail reports it as its own\n// 128 + SIGSEGV = 139 status and exits normally, so this is the case that\n// used to fall through to \"rejected\" and mass-misgrade a whole problem.\nstatic int* volatile p = nullptr;\n\nint main() {\n  *p = 1;\n  return 0;\n}\n"
+  },
+  "requires": [
+    "native"
+  ],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 1,
+      "passed": 0,
+      "failed": 1
+    },
+    "results": [
+      {
+        "index": 0,
+        "exitCode": 0,
+        "passed": false,
+        "expected": "1 2",
+        "received": "1 2\n",
+        "stderr": "",
+        "stdout": "1 2\n",
+        "timedOut": false,
+        "verdict": "IE"
+      }
+    ],
+    "effectiveMemoryLimitMb": 256
+  },
+  "patterns": {},
+  "measured": {
+    "results": [
+      {
+        "cpuMs": ">=0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      }
+    ]
+  }
+}

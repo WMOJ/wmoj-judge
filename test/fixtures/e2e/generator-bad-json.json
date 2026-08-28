@@ -1,0 +1,19 @@
+{
+  "name": "generator-bad-json",
+  "endpoint": "/generate-tests",
+  "request": {
+    "language": "cpp",
+    "code": "// Truncated JSON on stdout. The parse failure must name stdout and echo\n// the raw text so an admin can see what their generator printed.\n#include <cstdio>\n\nint main() {\n  std::printf(\"[\");\n  std::fprintf(stderr, \"[]\");\n  return 0;\n}\n"
+  },
+  "requires": [],
+  "status": 400,
+  "response": {
+    "error": "Invalid JSON on stdout: Unexpected end of JSON input",
+    "inputJson": "[",
+    "outputJson": "[]"
+  },
+  "patterns": {},
+  "measured": {
+    "results": []
+  }
+}

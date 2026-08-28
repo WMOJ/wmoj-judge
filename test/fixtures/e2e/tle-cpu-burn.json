@@ -1,0 +1,48 @@
+{
+  "name": "tle-cpu-burn",
+  "endpoint": "/submit",
+  "request": {
+    "language": "cpp17",
+    "code": "// Burns CPU forever. The arithmetic is on a volatile so the loop cannot\n// be optimised away, which would turn the CPU-time TLE gate into a wall\n// -clock one.\nint main() {\n  volatile unsigned long long x = 1;\n  for (;;) x = x * 1103515245ULL + 12345ULL;\n}\n",
+    "input": [
+      "1 2\n"
+    ],
+    "output": [
+      "3\n"
+    ],
+    "timeLimit": 500
+  },
+  "requires": [],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 1,
+      "passed": 0,
+      "failed": 1
+    },
+    "results": [
+      {
+        "index": 0,
+        "exitCode": 137,
+        "passed": false,
+        "expected": "3\n",
+        "received": "",
+        "stderr": "",
+        "stdout": "",
+        "timedOut": true,
+        "verdict": "TLE"
+      }
+    ],
+    "effectiveMemoryLimitMb": 256
+  },
+  "patterns": {},
+  "measured": {
+    "results": [
+      {
+        "cpuMs": ">=500",
+        "memKb": ">0",
+        "timeMs": ">0"
+      }
+    ]
+  }
+}

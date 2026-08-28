@@ -1,0 +1,47 @@
+{
+  "name": "nul-in-output",
+  "endpoint": "/submit",
+  "request": {
+    "language": "cpp17",
+    "code": "// A single NUL byte. It is valid UTF-8 and survives decoding, but\n// PostgreSQL jsonb cannot store it, so the sandbox substitutes U+FFFD.\n#include <cstdio>\n\nint main() {\n  std::putchar(0);\n  return 0;\n}\n",
+    "input": [
+      "1\n"
+    ],
+    "output": [
+      "0\n"
+    ]
+  },
+  "requires": [],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 1,
+      "passed": 0,
+      "failed": 1
+    },
+    "results": [
+      {
+        "index": 0,
+        "exitCode": 0,
+        "passed": false,
+        "expected": "0\n",
+        "received": "�",
+        "stderr": "",
+        "stdout": "�",
+        "timedOut": false,
+        "verdict": "WA"
+      }
+    ],
+    "effectiveMemoryLimitMb": 256
+  },
+  "patterns": {},
+  "measured": {
+    "results": [
+      {
+        "cpuMs": ">=0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      }
+    ]
+  }
+}

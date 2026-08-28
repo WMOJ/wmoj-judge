@@ -1,0 +1,23 @@
+{
+  "name": "400-bad-language",
+  "endpoint": "/submit",
+  "request": {
+    "language": "java",
+    "code": "// Reads two integers and prints their sum. The baseline \"correct\n// submission\" for the AC scenarios.\n#include <cstdio>\n\nint main() {\n  long long a = 0, b = 0;\n  if (std::scanf(\"%lld %lld\", &a, &b) != 2) return 1;\n  std::printf(\"%lld\\n\", a + b);\n  return 0;\n}\n",
+    "input": [
+      "1 2\n"
+    ],
+    "output": [
+      "3\n"
+    ]
+  },
+  "requires": [],
+  "status": 400,
+  "response": {
+    "error": "Unsupported language: java"
+  },
+  "patterns": {},
+  "measured": {
+    "results": []
+  }
+}

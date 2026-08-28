@@ -1,0 +1,67 @@
+{
+  "name": "checker-accept-reject",
+  "endpoint": "/submit",
+  "request": {
+    "language": "cpp17",
+    "code": "// Always answers \"1 2\", whatever the case. Right for one checker case and\n// wrong for the other -- which is the point: the checker, not the bytes,\n// decides.\n#include <cstdio>\n\nint main() {\n  std::printf(\"1 2\\n\");\n  return 0;\n}\n",
+    "input": [
+      "3 3\n1 2 5\n",
+      "3 9\n1 2 7\n"
+    ],
+    "output": [
+      "1 2",
+      "2 3"
+    ],
+    "checker": "// Reference custom checker for wmoj-judge.\n//\n// A checker is what you send in the `checker` field of POST /submit for\n// a problem whose answer is not unique. wmoj-judge compiles it once per\n// submission with\n//\n//     /usr/bin/g++ -O2 -std=gnu++17 Checker.cpp -o checker.out\n//\n// and runs it once per test case, inside the same nsjail sandbox as the\n// contestant's program, as\n//\n//     checker.out <input_file> <expected_file> <contestant_output_file>\n//\n// with the submission's workdir as cwd. Exit code carries the verdict\n// (testlib / DMOJ convention):\n//\n//     0  accepted\n//     1  wrong answer\n//     2  presentation error   -- wmoj-judge folds this into WA\n//     3  checker internal error -> verdict IE; the PROBLEM is at fault\n//     any other non-zero      -> wrong answer\n//\n// Anything >= 128 is NOT a verdict: nsjail reports a checker that died\n// by a signal as its own `128 + WTERMSIG` status (139 SIGSEGV, 134\n// SIGABRT, 159 SIGSYS from a syscall outside policy.kafel) and exits 255\n// when it could not exec the checker at all. wmoj-judge treats all of\n// those as IE. Do not use them as verdicts.\n//\n// !! THE EXIT CODES ARE TESTLIB'S; THE ARGUMENT ORDER IS NOT. !!\n// Upstream testlib.h binds argv[2] to the PARTICIPANT's output and\n// argv[3] to the JURY's answer. wmoj-judge passes them the other way\n// round, as written above. A checker lifted from a testlib problem\n// therefore ends up validating the jury's own answer -- which is valid\n// by construction -- so it exits 0 on every case and every submission to\n// that problem silently scores 100%, with nothing in the response to\n// distinguish it from an easy problem. Swap the two answer files when\n// adapting a testlib checker.\n//\n// Whatever the checker writes to stderr is trimmed, truncated to ~1 KB,\n// and returned to the caller as TestResult.checkerMessage. That is where\n// you explain WHY an answer was rejected -- use it.\n//\n// When a checker is supplied it REPLACES compareMode entirely; the byte\n// comparison is not run at all.\n//\n// ---------------------------------------------------------------------\n// The toy problem this checker judges\n//\n//   Input : n S, then n integers a[1..n].\n//   Output: any 1-based pair of distinct indices i j with a[i]+a[j] == S,\n//           or the single token IMPOSSIBLE if no such pair exists.\n//\n// The expected output holds ONE reference answer. Any other valid pair\n// must also be accepted -- which is exactly what byte comparison cannot\n// do, and the entire reason checkers exist.\n//\n// Note this deliberately uses plain standard headers rather than\n// <bits/stdc++.h>, so it also compiles under clang for local testing.\n// ---------------------------------------------------------------------\n\n#include <cstddef>\n#include <cstdlib>\n#include <fstream>\n#include <iostream>\n#include <string>\n#include <vector>\n\nnamespace {\n\nconstexpr int kAccepted = 0;\nconstexpr int kWrongAnswer = 1;\nconstexpr int kPresentationError = 2;\nconstexpr int kInternalError = 3;\n\n[[noreturn]] void quit(int code, const std::string& message) {\n  if (!message.empty()) std::cerr << message << std::endl;\n  std::exit(code);\n}\n\n// Read the answer written by one side. Returns false when the stream\n// held no answer at all.\nbool readAnswer(std::istream& in, bool& impossible, long long& i,\n                long long& j, std::string& trailing) {\n  std::string token;\n  if (!(in >> token)) return false;\n  if (token == \"IMPOSSIBLE\") {\n    impossible = true;\n  } else {\n    impossible = false;\n    try {\n      // std::stoll parses a numeric PREFIX and discards the rest, so\n      // std::stoll(\"1abc\") is 1 with no exception. Checking that the\n      // whole token was consumed is what stops \"1abc 2\" being read as\n      // the pair (1, 2) and ACCEPTED -- by a checker that goes out of\n      // its way to reject surplus output thirty lines below.\n      std::size_t consumed = 0;\n      i = std::stoll(token, &consumed);\n      if (consumed != token.size()) return false;\n    } catch (...) {\n      return false;\n    }\n    if (!(in >> j)) return false;\n  }\n  // Anything further is surplus output.\n  in >> trailing;\n  return true;\n}\n\nbool pairIsValid(const std::vector<long long>& a, long long target,\n                 long long i, long long j) {\n  const long long n = static_cast<long long>(a.size());\n  if (i < 1 || i > n || j < 1 || j > n) return false;\n  if (i == j) return false;\n  return a[static_cast<size_t>(i - 1)] + a[static_cast<size_t>(j - 1)] == target;\n}\n\n}  // namespace\n\nint main(int argc, char** argv) {\n  if (argc < 4) {\n    quit(kInternalError,\n         \"usage: checker <input_file> <expected_file> <contestant_output_file>\");\n  }\n\n  std::ifstream fin(argv[1]);\n  std::ifstream fexpected(argv[2]);\n  std::ifstream fcontestant(argv[3]);\n  if (!fin) quit(kInternalError, std::string(\"cannot open input file: \") + argv[1]);\n  if (!fexpected) quit(kInternalError, std::string(\"cannot open expected file: \") + argv[2]);\n  if (!fcontestant) quit(kInternalError, std::string(\"cannot open output file: \") + argv[3]);\n\n  long long n = 0;\n  long long target = 0;\n  if (!(fin >> n >> target)) quit(kInternalError, \"malformed input: expected 'n S'\");\n  if (n < 0 || n > 10000000LL) quit(kInternalError, \"malformed input: implausible n\");\n\n  std::vector<long long> a(static_cast<size_t>(n));\n  for (long long k = 0; k < n; ++k) {\n    if (!(fin >> a[static_cast<size_t>(k)])) {\n      quit(kInternalError, \"malformed input: fewer than n values\");\n    }\n  }\n\n  bool juryImpossible = false;\n  long long juryI = 0, juryJ = 0;\n  std::string juryTrailing;\n  if (!readAnswer(fexpected, juryImpossible, juryI, juryJ, juryTrailing)) {\n    quit(kInternalError, \"malformed expected output\");\n  }\n  if (!juryImpossible && !pairIsValid(a, target, juryI, juryJ)) {\n    quit(kInternalError, \"the expected output is not itself a valid answer\");\n  }\n\n  bool userImpossible = false;\n  long long userI = 0, userJ = 0;\n  std::string userTrailing;\n  if (!readAnswer(fcontestant, userImpossible, userI, userJ, userTrailing)) {\n    quit(kPresentationError,\n         \"no answer found: expected 'i j' or the token IMPOSSIBLE\");\n  }\n  if (!userTrailing.empty()) {\n    quit(kPresentationError, \"surplus output after the answer: '\" + userTrailing + \"'\");\n  }\n\n  if (userImpossible) {\n    if (juryImpossible) quit(kAccepted, \"\");\n    quit(kWrongAnswer,\n         \"claimed IMPOSSIBLE, but \" + std::to_string(juryI) + \" \" +\n             std::to_string(juryJ) + \" is a valid pair\");\n  }\n\n  if (!pairIsValid(a, target, userI, userJ)) {\n    quit(kWrongAnswer, \"pair \" + std::to_string(userI) + \" \" +\n                           std::to_string(userJ) +\n                           \" is out of range, not distinct, or does not sum to \" +\n                           std::to_string(target));\n  }\n\n  if (juryImpossible) {\n    // The contestant found a valid pair the jury said did not exist:\n    // the TEST DATA is wrong, not the contestant. Exit 3 so this shows\n    // up as IE and someone fixes the problem.\n    quit(kInternalError,\n         \"contestant found valid pair \" + std::to_string(userI) + \" \" +\n             std::to_string(userJ) + \" but the expected output says IMPOSSIBLE\");\n  }\n\n  quit(kAccepted, \"\");\n}\n"
+  },
+  "requires": [],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 2,
+      "passed": 1,
+      "failed": 1
+    },
+    "results": [
+      {
+        "index": 0,
+        "exitCode": 0,
+        "passed": true,
+        "expected": "1 2",
+        "received": "1 2\n",
+        "stderr": "",
+        "stdout": "1 2\n",
+        "timedOut": false,
+        "verdict": "AC"
+      },
+      {
+        "index": 1,
+        "exitCode": 0,
+        "passed": false,
+        "expected": "2 3",
+        "received": "1 2\n",
+        "stderr": "",
+        "stdout": "1 2\n",
+        "timedOut": false,
+        "verdict": "WA",
+        "checkerMessage": "pair 1 2 is out of range, not distinct, or does not sum to 9"
+      }
+    ],
+    "effectiveMemoryLimitMb": 256
+  },
+  "patterns": {},
+  "measured": {
+    "results": [
+      {
+        "cpuMs": ">=0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      },
+      {
+        "cpuMs": ">=0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      }
+    ]
+  }
+}

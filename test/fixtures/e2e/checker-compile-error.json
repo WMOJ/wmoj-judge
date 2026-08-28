@@ -1,0 +1,32 @@
+{
+  "name": "checker-compile-error",
+  "endpoint": "/submit",
+  "request": {
+    "language": "cpp17",
+    "code": "// Always answers \"1 2\", whatever the case. Right for one checker case and\n// wrong for the other -- which is the point: the checker, not the bytes,\n// decides.\n#include <cstdio>\n\nint main() {\n  std::printf(\"1 2\\n\");\n  return 0;\n}\n",
+    "input": [
+      "3 3\n1 2 5\n"
+    ],
+    "output": [
+      "1 2"
+    ],
+    "checker": "#include <cstdio>\n\nint main() {\n  std::printf(\"unterminated\n  return 0;\n}\n"
+  },
+  "requires": [],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 0,
+      "passed": 0,
+      "failed": 0
+    },
+    "results": [],
+    "effectiveMemoryLimitMb": 256
+  },
+  "patterns": {
+    "checkerError": "(^|/)Checker\\.cpp:\\d+:\\d+: error"
+  },
+  "measured": {
+    "results": []
+  }
+}

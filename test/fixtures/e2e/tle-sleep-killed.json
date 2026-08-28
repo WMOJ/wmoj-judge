@@ -1,0 +1,48 @@
+{
+  "name": "tle-sleep-killed",
+  "endpoint": "/submit",
+  "request": {
+    "language": "python3",
+    "code": "# Blocks for 10 s without consuming CPU: nothing the CPU-time gate can\n# see. Node's last-resort SIGKILL timer (timeLimit + 5 s) is what ends it,\n# and the jail runner's report does not survive that kill.\nimport time\n\ntime.sleep(10)\nprint(\"done\")\n",
+    "input": [
+      "1 2\n"
+    ],
+    "output": [
+      "3\n"
+    ],
+    "timeLimit": 500
+  },
+  "requires": [],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 1,
+      "passed": 0,
+      "failed": 1
+    },
+    "results": [
+      {
+        "index": 0,
+        "exitCode": null,
+        "passed": false,
+        "expected": "3\n",
+        "received": "",
+        "stderr": "",
+        "stdout": "",
+        "timedOut": true,
+        "verdict": "TLE"
+      }
+    ],
+    "effectiveMemoryLimitMb": 256
+  },
+  "patterns": {},
+  "measured": {
+    "results": [
+      {
+        "cpuMs": ">=0",
+        "memKb": ">=0",
+        "timeMs": ">0"
+      }
+    ]
+  }
+}

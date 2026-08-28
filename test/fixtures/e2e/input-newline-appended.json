@@ -1,0 +1,47 @@
+{
+  "name": "input-newline-appended",
+  "endpoint": "/submit",
+  "request": {
+    "language": "python3",
+    "code": "# Echoes exactly what arrived on stdin, quoted. Distinguishes \"no input at\n# all\" from \"one blank line\", which is the difference a newline-appending\n# bug erases.\nimport sys\n\nprint(repr(sys.stdin.read()))\n",
+    "input": [
+      "1 2"
+    ],
+    "output": [
+      "'1 2\\n'\n"
+    ]
+  },
+  "requires": [],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "results": [
+      {
+        "index": 0,
+        "exitCode": 0,
+        "passed": true,
+        "expected": "'1 2\\n'\n",
+        "received": "'1 2\\n'\n",
+        "stderr": "",
+        "stdout": "'1 2\\n'\n",
+        "timedOut": false,
+        "verdict": "AC"
+      }
+    ],
+    "effectiveMemoryLimitMb": 256
+  },
+  "patterns": {},
+  "measured": {
+    "results": [
+      {
+        "cpuMs": ">0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      }
+    ]
+  }
+}

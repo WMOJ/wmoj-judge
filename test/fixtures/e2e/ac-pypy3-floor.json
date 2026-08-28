@@ -1,0 +1,86 @@
+{
+  "name": "ac-pypy3-floor",
+  "endpoint": "/submit",
+  "request": {
+    "language": "pypy3",
+    "code": "# Reads two integers and prints their sum. CPython/PyPy twin of sum.cpp.\nimport sys\n\na, b = map(int, sys.stdin.readline().split())\nprint(a + b)\n",
+    "input": [
+      "1 2\n",
+      "10 20\n",
+      "-5 5\n"
+    ],
+    "output": [
+      "3\n",
+      "30\n",
+      "0\n"
+    ],
+    "memoryLimit": 256
+  },
+  "requires": [
+    "native"
+  ],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 3,
+      "passed": 3,
+      "failed": 0
+    },
+    "results": [
+      {
+        "index": 0,
+        "exitCode": 0,
+        "passed": true,
+        "expected": "3\n",
+        "received": "3\n",
+        "stderr": "",
+        "stdout": "3\n",
+        "timedOut": false,
+        "verdict": "AC"
+      },
+      {
+        "index": 1,
+        "exitCode": 0,
+        "passed": true,
+        "expected": "30\n",
+        "received": "30\n",
+        "stderr": "",
+        "stdout": "30\n",
+        "timedOut": false,
+        "verdict": "AC"
+      },
+      {
+        "index": 2,
+        "exitCode": 0,
+        "passed": true,
+        "expected": "0\n",
+        "received": "0\n",
+        "stderr": "",
+        "stdout": "0\n",
+        "timedOut": false,
+        "verdict": "AC"
+      }
+    ],
+    "effectiveMemoryLimitMb": 384
+  },
+  "patterns": {},
+  "measured": {
+    "results": [
+      {
+        "cpuMs": ">0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      },
+      {
+        "cpuMs": ">0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      },
+      {
+        "cpuMs": ">0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      }
+    ]
+  }
+}

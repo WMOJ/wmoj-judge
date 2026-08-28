@@ -1,0 +1,49 @@
+{
+  "name": "re-segfault",
+  "endpoint": "/submit",
+  "request": {
+    "language": "cpp17",
+    "code": "// Null-pointer write -> SIGSEGV -> nsjail reports 128 + 11 = 139.\n//\n// `p` is itself volatile so the LOAD of the pointer is a volatile access:\n// without that, -O2's -fisolate-erroneous-paths-dereference can prove the\n// store is a null dereference and replace it with __builtin_trap, which\n// raises SIGILL (exit 132) instead of the SIGSEGV this scenario pins.\nstatic int* volatile p = nullptr;\n\nint main() {\n  *p = 1;\n  return 0;\n}\n",
+    "input": [
+      "1 2\n"
+    ],
+    "output": [
+      "3\n"
+    ]
+  },
+  "requires": [
+    "native"
+  ],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 1,
+      "passed": 0,
+      "failed": 1
+    },
+    "results": [
+      {
+        "index": 0,
+        "exitCode": 139,
+        "passed": false,
+        "expected": "3\n",
+        "received": "",
+        "stderr": "",
+        "stdout": "",
+        "timedOut": false,
+        "verdict": "RE"
+      }
+    ],
+    "effectiveMemoryLimitMb": 256
+  },
+  "patterns": {},
+  "measured": {
+    "results": [
+      {
+        "cpuMs": ">=0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      }
+    ]
+  }
+}

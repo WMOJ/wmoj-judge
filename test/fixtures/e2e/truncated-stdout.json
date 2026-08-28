@@ -1,0 +1,48 @@
+{
+  "name": "truncated-stdout",
+  "endpoint": "/submit",
+  "request": {
+    "language": "cpp17",
+    "code": "// Writes 2 MiB, twice the sandbox's 1 MiB stdout cap, so the retained\n// stdout is a prefix and `truncated` is set.\n#include <cstdio>\n\nint main() {\n  for (int i = 0; i < 2 * 1024 * 1024; ++i) std::putchar('x');\n  return 0;\n}\n",
+    "input": [
+      "1\n"
+    ],
+    "output": [
+      "x\n"
+    ]
+  },
+  "requires": [],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 1,
+      "passed": 0,
+      "failed": 1
+    },
+    "results": [
+      {
+        "index": 0,
+        "exitCode": 0,
+        "passed": false,
+        "expected": "x\n",
+        "stderr": "",
+        "timedOut": false,
+        "verdict": "WA",
+        "truncated": true
+      }
+    ],
+    "effectiveMemoryLimitMb": 256
+  },
+  "patterns": {},
+  "measured": {
+    "results": [
+      {
+        "cpuMs": ">=0",
+        "memKb": ">0",
+        "timeMs": ">0",
+        "stdout.length": "===1048576",
+        "received.length": "===1048576"
+      }
+    ]
+  }
+}

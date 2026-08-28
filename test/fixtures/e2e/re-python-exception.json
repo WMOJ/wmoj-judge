@@ -1,0 +1,48 @@
+{
+  "name": "re-python-exception",
+  "endpoint": "/submit",
+  "request": {
+    "language": "python3",
+    "code": "# Uncaught exception: exit 1 with a traceback on stderr. The traceback\n# carries the per-submission workdir path, so only the exception name is\n# asserted.\nraise ValueError(\"boom\")\n",
+    "input": [
+      "1 2\n"
+    ],
+    "output": [
+      "3\n"
+    ]
+  },
+  "requires": [],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 1,
+      "passed": 0,
+      "failed": 1
+    },
+    "results": [
+      {
+        "index": 0,
+        "exitCode": 1,
+        "passed": false,
+        "expected": "3\n",
+        "received": "",
+        "stdout": "",
+        "timedOut": false,
+        "verdict": "RE"
+      }
+    ],
+    "effectiveMemoryLimitMb": 256
+  },
+  "patterns": {
+    "results[0].stderr": "ValueError"
+  },
+  "measured": {
+    "results": [
+      {
+        "cpuMs": ">0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      }
+    ]
+  }
+}

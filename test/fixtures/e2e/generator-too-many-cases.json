@@ -1,0 +1,20 @@
+{
+  "name": "generator-too-many-cases",
+  "endpoint": "/generate-tests",
+  "request": {
+    "language": "cpp",
+    "code": "// 201 pairs: one past the case cap /submit will later enforce on exactly\n// this data. The judge must refuse it here rather than hand an admin test\n// data it would 413 on.\n#include <cstdio>\n\nint main() {\n  std::printf(\"[\");\n  std::fprintf(stderr, \"[\");\n  for (int i = 0; i <= 200; ++i) {\n    const char* sep = i == 0 ? \"\" : \",\";\n    std::printf(\"%s\\\"%d\\\"\", sep, i);\n    std::fprintf(stderr, \"%s\\\"%d\\\"\", sep, i);\n  }\n  std::printf(\"]\");\n  std::fprintf(stderr, \"]\");\n  return 0;\n}\n"
+  },
+  "requires": [],
+  "status": 400,
+  "response": {
+    "error": "generated test data exceeds the limits /submit enforces",
+    "reason": "too many test cases (max 200)",
+    "limit": 200,
+    "count": 201
+  },
+  "patterns": {},
+  "measured": {
+    "results": []
+  }
+}

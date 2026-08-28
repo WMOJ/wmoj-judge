@@ -1,0 +1,84 @@
+{
+  "name": "ac-ceiling-clamp",
+  "endpoint": "/submit",
+  "request": {
+    "language": "cpp17",
+    "code": "// Reads two integers and prints their sum. The baseline \"correct\n// submission\" for the AC scenarios.\n#include <cstdio>\n\nint main() {\n  long long a = 0, b = 0;\n  if (std::scanf(\"%lld %lld\", &a, &b) != 2) return 1;\n  std::printf(\"%lld\\n\", a + b);\n  return 0;\n}\n",
+    "input": [
+      "1 2\n",
+      "10 20\n",
+      "-5 5\n"
+    ],
+    "output": [
+      "3\n",
+      "30\n",
+      "0\n"
+    ],
+    "memoryLimit": 1024
+  },
+  "requires": [],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 3,
+      "passed": 3,
+      "failed": 0
+    },
+    "results": [
+      {
+        "index": 0,
+        "exitCode": 0,
+        "passed": true,
+        "expected": "3\n",
+        "received": "3\n",
+        "stderr": "",
+        "stdout": "3\n",
+        "timedOut": false,
+        "verdict": "AC"
+      },
+      {
+        "index": 1,
+        "exitCode": 0,
+        "passed": true,
+        "expected": "30\n",
+        "received": "30\n",
+        "stderr": "",
+        "stdout": "30\n",
+        "timedOut": false,
+        "verdict": "AC"
+      },
+      {
+        "index": 2,
+        "exitCode": 0,
+        "passed": true,
+        "expected": "0\n",
+        "received": "0\n",
+        "stderr": "",
+        "stdout": "0\n",
+        "timedOut": false,
+        "verdict": "AC"
+      }
+    ],
+    "effectiveMemoryLimitMb": 384
+  },
+  "patterns": {},
+  "measured": {
+    "results": [
+      {
+        "cpuMs": ">=0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      },
+      {
+        "cpuMs": ">=0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      },
+      {
+        "cpuMs": ">=0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      }
+    ]
+  }
+}

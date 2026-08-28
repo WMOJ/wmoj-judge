@@ -1,0 +1,48 @@
+{
+  "name": "sleepy-but-finished",
+  "endpoint": "/submit",
+  "request": {
+    "language": "python3",
+    "code": "# Sleeps past its 500 ms limit in wall-clock terms but exits cleanly with\n# almost no CPU. The clean-exit guard must keep this AC.\nimport sys\nimport time\n\na, b = map(int, sys.stdin.readline().split())\ntime.sleep(2)\nprint(a + b)\n",
+    "input": [
+      "1 2\n"
+    ],
+    "output": [
+      "3\n"
+    ],
+    "timeLimit": 500
+  },
+  "requires": [],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "results": [
+      {
+        "index": 0,
+        "exitCode": 0,
+        "passed": true,
+        "expected": "3\n",
+        "received": "3\n",
+        "stderr": "",
+        "stdout": "3\n",
+        "timedOut": false,
+        "verdict": "AC"
+      }
+    ],
+    "effectiveMemoryLimitMb": 256
+  },
+  "patterns": {},
+  "measured": {
+    "results": [
+      {
+        "cpuMs": ">0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      }
+    ]
+  }
+}

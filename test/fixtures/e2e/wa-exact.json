@@ -1,0 +1,48 @@
+{
+  "name": "wa-exact",
+  "endpoint": "/submit",
+  "request": {
+    "language": "cpp17",
+    "code": "// Correct sum, printed with ONE trailing space. `trim-trailing` (the\n// default comparator) accepts it; `exact` does not.\n#include <cstdio>\n\nint main() {\n  long long a = 0, b = 0;\n  if (std::scanf(\"%lld %lld\", &a, &b) != 2) return 1;\n  std::printf(\"%lld \\n\", a + b);\n  return 0;\n}\n",
+    "input": [
+      "1 2\n"
+    ],
+    "output": [
+      "3\n"
+    ],
+    "compareMode": "exact"
+  },
+  "requires": [],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 1,
+      "passed": 0,
+      "failed": 1
+    },
+    "results": [
+      {
+        "index": 0,
+        "exitCode": 0,
+        "passed": false,
+        "expected": "3\n",
+        "received": "3 \n",
+        "stderr": "",
+        "stdout": "3 \n",
+        "timedOut": false,
+        "verdict": "WA"
+      }
+    ],
+    "effectiveMemoryLimitMb": 256
+  },
+  "patterns": {},
+  "measured": {
+    "results": [
+      {
+        "cpuMs": ">=0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      }
+    ]
+  }
+}

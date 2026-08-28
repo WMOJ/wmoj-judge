@@ -1,0 +1,19 @@
+{
+  "name": "generator-nonzero-exit",
+  "endpoint": "/generate-tests",
+  "request": {
+    "language": "cpp",
+    "code": "// Exits non-zero with nothing on either stream: a generator failure, and\n// a 400 rather than /submit's 200-with-compileError.\nint main() { return 2; }\n"
+  },
+  "requires": [],
+  "status": 400,
+  "response": {
+    "error": "Generator exited with code 2 (ok)",
+    "inputJson": "",
+    "outputJson": ""
+  },
+  "patterns": {},
+  "measured": {
+    "results": []
+  }
+}

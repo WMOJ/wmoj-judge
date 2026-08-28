@@ -1,0 +1,49 @@
+{
+  "name": "seccomp-socket-denied",
+  "endpoint": "/submit",
+  "request": {
+    "language": "cpp17",
+    "code": "// Network access is blocked by seccomp alone -- there is no second layer.\n// policy.kafel lists `socket` under ERRNO(1), so the call FAILS with\n// EPERM rather than killing the process; an unfiltered judge prints a\n// live descriptor here instead.\n#include <cerrno>\n#include <cstdio>\n#include <sys/socket.h>\n\nint main() {\n  errno = 0;\n  int fd = socket(AF_INET, SOCK_STREAM, 0);\n  std::printf(\"fd=%d errno=%d\\n\", fd, fd < 0 ? errno : 0);\n  return 0;\n}\n",
+    "input": [
+      "1\n"
+    ],
+    "output": [
+      "fd=-1 errno=1\n"
+    ]
+  },
+  "requires": [
+    "seccomp"
+  ],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "results": [
+      {
+        "index": 0,
+        "exitCode": 0,
+        "passed": true,
+        "expected": "fd=-1 errno=1\n",
+        "received": "fd=-1 errno=1\n",
+        "stderr": "",
+        "stdout": "fd=-1 errno=1\n",
+        "timedOut": false,
+        "verdict": "AC"
+      }
+    ],
+    "effectiveMemoryLimitMb": 256
+  },
+  "patterns": {},
+  "measured": {
+    "results": [
+      {
+        "cpuMs": ">=0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      }
+    ]
+  }
+}

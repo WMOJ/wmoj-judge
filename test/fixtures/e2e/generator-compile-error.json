@@ -1,0 +1,17 @@
+{
+  "name": "generator-compile-error",
+  "endpoint": "/generate-tests",
+  "request": {
+    "language": "cpp",
+    "code": "#include <cstdio>\n\nint main() {\n  std::printf(\"unterminated\n  return 0;\n}\n"
+  },
+  "requires": [],
+  "status": 400,
+  "response": {},
+  "patterns": {
+    "error": "(^|/)Generator\\.cpp:\\d+:\\d+: error"
+  },
+  "measured": {
+    "results": []
+  }
+}

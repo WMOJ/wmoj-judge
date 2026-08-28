@@ -1,0 +1,26 @@
+{
+  "name": "generator-ok",
+  "endpoint": "/generate-tests",
+  "request": {
+    "language": "cpp",
+    "code": "// Inputs on stdout, expected outputs on stderr, equal length.\n#include <cstdio>\n\nint main() {\n  std::printf(\"[\\\"1 2\\\",\\\"3 4\\\"]\");\n  std::fprintf(stderr, \"[\\\"3\\\",\\\"7\\\"]\");\n  return 0;\n}\n"
+  },
+  "requires": [],
+  "status": 200,
+  "response": {
+    "inputJson": "[\"1 2\",\"3 4\"]",
+    "outputJson": "[\"3\",\"7\"]",
+    "input": [
+      "1 2",
+      "3 4"
+    ],
+    "output": [
+      "3",
+      "7"
+    ]
+  },
+  "patterns": {},
+  "measured": {
+    "results": []
+  }
+}
