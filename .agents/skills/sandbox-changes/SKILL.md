@@ -168,7 +168,7 @@ Never add a fifth to make something work.
 Node emits `'close'` only after the process has ended **and every stdio stream has closed**, and a
 pipe EOFs only when every copy of the write end is gone — including copies held by descendants. With
 no PID namespace and `clone` allowed, `int main(){ if (fork()==0) pause(); }` used to hold fds 1/2
-open forever: the promise never settled, `submit.ts`'s `finally` never ran, and a UID-pool slot plus
+open forever: the promise never settled, the workspace lease's teardown never ran, and a UID-pool slot plus
 a semaphore permit leaked permanently. Sixteen of those wedged the whole judge while `/health` stayed
 green, and only a redeploy recovered. Four things keep that fixed, and none of them is optional:
 
@@ -297,8 +297,9 @@ PID through `/proc` and SIGKILL it.
 to the same UID, so the cache's `0700` mode buys nothing against another submission.
 
 **4. There is exactly one UID, and it is not a boundary.** Every submission, `g++`, and the Node
-judge run as UID 1000. The per-submission `0700` `mkdtemp` workdir is hygiene against *other UIDs on
-the host*, not cross-submission isolation. What genuinely holds is that `ptrace`, `process_vm_readv`,
+judge run as UID 1000. The per-submission `0700` `mkdtemp` workdir — leased, with its pool UID, by
+`withWorkspace` in `src/workspace` — is hygiene against *other UIDs on the host*, not
+cross-submission isolation. What genuinely holds is that `ptrace`, `process_vm_readv`,
 `process_vm_writev` and `kcmp` are all denied, so concurrent submissions cannot read each other's
 memory.
 

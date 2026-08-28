@@ -25,15 +25,6 @@ import { WORKDIR_PREFIX } from "../config";
 const activeWorkdirs = new Set<string>();
 
 /**
- * Create a fresh, private working directory for a submission and
- * transfer ownership to the pool UID.
- *
- * The returned path is mode 0700 and owned by `uid:uid`, so only the
- * sandboxed child process can read or write inside it. On Render, Node
- * itself runs as UID 1000 -- the same UID the child gets -- so it can
- * still access the directory for setup and teardown without a chown.
- */
-/**
  * True when Node is running as root (effective UID 0). Captured once at module
  * load.
  *
@@ -43,10 +34,23 @@ const activeWorkdirs = new Set<string>();
  * CAP_CHOWN or a matching UID). Because the workdir was `mkdtemp`'d by us and
  * the sandbox inherits our UID (no `--user` flag), files are already owned by
  * the process that will execute them.
+ *
+ * Read by `src/workspace`, which owns the same rule for the FILES written
+ * into a workdir after it is created. This module chowns the directory
+ * itself and nothing else.
  */
 export const isRootNode: boolean =
   typeof process.geteuid === "function" && process.geteuid() === 0;
 
+/**
+ * Create a fresh, private working directory for a submission and
+ * transfer ownership to the pool UID.
+ *
+ * The returned path is mode 0700 and owned by `uid:uid`, so only the
+ * sandboxed child process can read or write inside it. On Render, Node
+ * itself runs as UID 1000 -- the same UID the child gets -- so it can
+ * still access the directory for setup and teardown without a chown.
+ */
 export async function createWorkdir(uid: number): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), WORKDIR_PREFIX));
   try {

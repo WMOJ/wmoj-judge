@@ -97,7 +97,7 @@ above.
 
 The cache key is `sha256(language ‖ code ‖ compileArgv)`, so **changing a flag invalidates correctly
 on its own** — you do not need to clear anything, and the 15-minute TTL absorbs the miss. Interpreted
-languages key on an empty argv, which is why two identical Python submissions share an entry.
+languages skip the cache entirely — no key, no entry (ADR 0004).
 
 Because there is now one `cppCompileArgv`, a flag added there changes **every** compile: submissions,
 custom checkers and `/generate-tests` generators alike. That is the point — the three used to be

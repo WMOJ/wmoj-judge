@@ -1,6 +1,6 @@
 ---
 name: custom-checkers
-description: Works on wmoj-judge's custom-checker path for problems whose answer is not unique — the problem-setter compile line shared with /generate-tests through src/languages (the submission dialect, ADR 0003), the once-per-submission compile ordering the compile cache depends on, the per-case three-file invocation and its limits, the testlib exit-code table and its IE cases, and the checkerMessage truncation rules. Use whenever someone wants to write, debug, change, review, or extend a checker, the checker field of POST /submit, src/checker/, checkerError, or IE verdicts.
+description: Works on wmoj-judge's custom-checker path for problems whose answer is not unique — the problem-setter compile line shared with /generate-tests through src/languages (the submission dialect, ADR 0003), the once-per-submission compile and the artifact list that keeps a checker binary out of the compile cache, the per-case three-file invocation and its limits, the testlib exit-code table and its IE cases, and the checkerMessage truncation rules. Use whenever someone wants to write, debug, change, review, or extend a checker, the checker field of POST /submit, src/checker/, checkerError, or IE verdicts.
 ---
 
 # Custom checkers in wmoj-judge
@@ -23,24 +23,28 @@ every submission uses:
 /usr/bin/g++ -O2 -std=c++17 -fmax-errors=50 Checker.cpp -o checker.out
 ```
 
-Relative paths, run with `cwd: workDir`, so a diagnostic in `checkerError` reads `Checker.cpp:3:1:
+Relative paths, run with `cwd: ws.dir`, so a diagnostic in `checkerError` reads `Checker.cpp:3:1:
 …` and never leaks the workdir. The dialect is the **submission's** by decision, not by accident:
 every stored checker and generator (64 of 64) was audited under both `gnu++17` and `c++17` before
 the switch — `docs/adr/0003-problem-setter-code-compiles-under-the-submission-dialect.md`. Like the
 generator's, this compile runs **outside nsjail** — problem-setter source is the same trust boundary
 `/generate-tests` already assumed — but with a scrubbed child env.
 
-**2. Compiled AFTER the compile cache has been populated. This ordering is load-bearing.** The cache
-stores the *whole workdir* keyed on `sha256(language ‖ code ‖ compileArgv)`. A `checker.out` sitting
-in the workdir at `put()` time would be handed to a different problem whose contestant happened to
-submit the same source, and that problem would then be graded by the wrong checker. A natural-looking
-"compile everything up front" refactor breaks this silently. Compiling here also means the g++ run is
-skipped entirely when the user's own code failed to compile.
+**2. Compiled into the submission's workspace, after the submission's own compile.** `compileChecker`
+takes the `Workspace` (`src/workspace`), not a path: `ws.write("Checker.cpp", source)` then g++ with
+`cwd: ws.dir`, so the chown-when-root rule is the workspace's one implementation and the checker path
+has none of its own. Ordering against the compile cache is **no longer a constraint** — `put()` copies
+only the artifacts `languages.json` declares (`a.out`), so a `checker.out` in the workspace can never
+enter an entry keyed on someone else's source. It used to store the whole workdir, and the hazard that
+created (a problem graded by another problem's checker, whenever two contestants submitted identical
+source) was held off by a comment. Compiling after the submission's own compile is kept for a
+different reason: the g++ run is skipped entirely when the user's code failed to compile.
 
 **3. Invoked per case** as `./checker.out <input> <expected> <received>` — three real files written
-into the workdir, passed **relative** to it because nsjail sets it as cwd. The scratch files are
-removed after each case (`fs.rm` with `recursive: true`, or a directory left behind is unremovable):
-200 cases × 3 files × up to 1 MB would not fit on a 512 MB host.
+into the workspace with `ws.write`, passed **relative** to it because nsjail sets it as cwd. The
+scratch files are removed after each case with `ws.remove`, which is recursive (a directory left
+where a file was expected is otherwise unremovable): 200 cases × 3 files × up to 1 MB would not fit
+on a 512 MB host.
 
 Those filenames carry a per-call `nanoid`. They used to be derived only from the case index, and the
 contestant's program runs at the same UID in the same workdir strictly *before* the next case's files
@@ -107,8 +111,9 @@ bad case must not reject and take every already-computed verdict down with it.
 
 **The one exception is a judge fault.** `runChecker` resolves a `CheckerRun`:
 `{ok: true, verdict}` or `{ok: false, sandboxError}`. The second arm is the *judge's* sandbox
-failing, not the problem's configuration, so `submit.ts` throws on it and the route returns
-`500 {error}`. Never map it to `IE` — see `verdicts-and-comparison`.
+failing, not the problem's configuration, so `judgeCase` (`src/judge/judgeCase.ts`) throws on it,
+`judgeAllCases` hands it back as `ok: false`, and the route returns `500 {error}`. Never map it to
+`IE` — see `verdicts-and-comparison`.
 
 **The checker's stdout is completely ignored.** This is an exit-code-only protocol, not the full
 testlib result-file protocol. Do not write a result file and do not expect one to be read.
@@ -175,8 +180,9 @@ sandbox; see the `sandbox-changes` skill for why `/app` and the workdir are writ
 - Never spell a g++ line by hand — every compile in the judge comes from `src/languages`
   (`cppCompileArgv`/`setterCompileArgv`), and never move the checker off the submission dialect
   without redoing the audit behind ADR 0003.
-- Never compile the checker before the compile cache `put()`, and never cache a workdir containing
-  `checker.out`.
+- Never widen what the compile cache stores back to the whole workspace — `put(key, dir, artifacts)`
+  takes the language's artifact list, and that list is the only thing standing between a checker
+  binary and another problem's submission.
 - Never merge `checkerError` into `compileError`, and never return 4xx for either. Every failure path
   in `compileChecker`, `fs.writeFile` of `Checker.cpp` included, must resolve `{ok:false, stderr}`
   rather than reject — a rejection there is a 500 where the contract promises a 200.

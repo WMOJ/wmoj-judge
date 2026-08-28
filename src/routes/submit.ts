@@ -1,25 +1,24 @@
 import { Router, type Request, type Response } from "express";
-import { promises as fs } from "fs";
-import * as path from "path";
 import type {
   SubmitRequest,
   SubmitResponse,
-  TestResult,
   CompareMode,
 } from "../types";
 import { config } from "../config";
 import { submitSemaphore } from "../queue/globalSemaphore";
-import pLimit from "p-limit";
 import { compileCache, cacheKey } from "../cache/compileCache";
-import { runSandboxed } from "../sandbox/nsjail";
-import { gradeCase, type CaseLimits, type Judge } from "../verdict";
-import { acquireUid, releaseUid } from "../queue/uidPoolSingleton";
-import { createWorkdir, cleanupWorkdir, isRootNode } from "../util/workdir";
+import type { CaseLimits } from "../verdict";
 import { isLanguage, languageSpec } from "../languages";
 import { buildChildEnv } from "../sandbox/minimalEnv";
-import { runCompile, type CompileResult } from "../util/compile";
-import { compare } from "../compare";
-import { compileChecker, runChecker } from "../checker";
+import { runCompile } from "../util/compile";
+import { compileChecker } from "../checker";
+import {
+  judgeAllCases,
+  productionJudgeDeps,
+  type CaseInput,
+  type Grading,
+} from "../judge/judgeCase";
+import { withWorkspace } from "../workspace";
 import { logger } from "../util/logger";
 import { isDraining } from "../util/shutdown";
 
@@ -142,25 +141,6 @@ export function effectiveMemLimitMb(
   return Math.max(1, Math.floor(Math.min(requestedMb, ceilingMb)));
 }
 
-/**
- * The settled outcome of grading one test case.
- *
- * Per-case tasks resolve one of these instead of rejecting. `Promise.all`
- * rejects on the FIRST rejection, so a single throwing case used to
- * return 500 while p-limit — which has no cancellation; its runner is
- * `try { await result } catch {}` then `next()` — kept dequeuing up to
- * 199 more. Those ran with `--cwd` pointing at a directory the route's
- * `finally` had already removed, under a UID already handed to another
- * submission, each arming a `timeLimitMs + 5000` timer, all of it
- * outside the global semaphore the closure had released — and with
- * `exitRequest()` already fired, so a concurrent SIGTERM saw
- * `inFlight === 0`. Settling every case before teardown is what closes
- * that window.
- */
-type CaseOutcome =
-  | { ok: true; result: TestResult }
-  | { ok: false; error: Error };
-
 /** Narrow an unknown thrown value to an Error without a custom class. */
 function asError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err));
@@ -170,25 +150,23 @@ export const submitRouter: Router = Router();
 
 /**
  * POST /submit — main judging endpoint. Flow:
- *  1. validate payload  2. resolve the language spec
- *  3. acquire global semaphore slot  4. acquire UID + workdir
- *  5. check compile cache → compile if miss (compile fail → HTTP 200 with compileError)
- *  6. put artifact in cache
+ *  1. validate payload  2. resolve the language spec and the limits
+ *  3. acquire a global semaphore slot  4. lease a workspace
+ *  5. write the source; for a COMPILED language check the compile cache
+ *     and compile on a miss (compile fail → HTTP 200 with compileError)
+ *  6. store the language's artifacts in the cache
  *  7. compile the custom checker once, if one was supplied
  *     (checker compile fail → HTTP 200 with checkerError)
- *  8. per-submission p-limit runs each test
- *  9. each test: nsjail measures → `gradeCase` decides, calling the
- *     checker or the comparator only if the program finished cleanly
- * 10. every case settles (none may still be running), then sort by
- *     index, summarize, cleanup, return 200.
+ *  8. `judgeAllCases` runs and grades every case, settling all of them
+ *  9. summarize and return 200.
  *
- * A judge-side sandbox failure at step 9 aborts the whole submission
- * with `500 {error}` rather than being graded — see the `ok: false`
- * handling inside the per-case task.
+ * A judge fault at step 8 aborts the whole submission with `500 {error}`
+ * rather than being graded — `judgeAllCases` returns it as `ok: false`
+ * and this route rethrows it into the `catch` below.
  */
 submitRouter.post("/", async (req: Request, res: Response) => {
   // Refuse new work during drain. Must run BEFORE any resource acquisition
-  // (semaphore / UID / workdir / sandbox spawn) so SIGTERM can actually
+  // (semaphore / workspace / sandbox spawn) so SIGTERM can actually
   // quiesce the judge within the drain window.
   if (isDraining()) {
     res.status(503).json({ error: "shutting down" });
@@ -224,10 +202,21 @@ submitRouter.post("/", async (req: Request, res: Response) => {
     config.HOST_MEMORY_CEILING_MB,
   );
   // Built once, not per case: every case of a submission is graded
-  // against the same enforced budget, and `gradeCase` takes the limits as
-  // a parameter precisely so the clamping stays here, at the route, where
-  // `config` belongs.
+  // against the same enforced budget, and the judge takes the limits as
+  // a parameter precisely so the clamping stays here, at the route,
+  // where `config` belongs.
   const limits: CaseLimits = { timeLimitMs, memLimitMb };
+  // A checker REPLACES compareMode; which one is in force is decided
+  // once, here, rather than re-derived per case.
+  const grading: Grading =
+    checkerSource === undefined
+      ? { kind: "compare", mode: compareMode }
+      : { kind: "checker" };
+  const cases: CaseInput[] = payload.input.map((input, index) => ({
+    index,
+    input,
+    expected: payload.output[index] ?? "",
+  }));
 
   logger.info(
     {
@@ -237,7 +226,6 @@ submitRouter.post("/", async (req: Request, res: Response) => {
       timeLimitMs,
       requestedMemLimitMb,
       memLimitMb,
-      // A checker REPLACES compareMode; log which one is in force.
       compareMode: checkerSource ? "custom-checker" : compareMode,
       checkerLen: checkerSource?.length ?? 0,
     },
@@ -247,282 +235,109 @@ submitRouter.post("/", async (req: Request, res: Response) => {
   // Whole /submit runs under the global semaphore. No work should happen
   // outside this closure (validation excepted) — it's what bounds load.
   await submitSemaphore(async () => {
-    let uid: number | null = null;
-    let workDir: string | null = null;
     try {
-      uid = await acquireUid();
-      workDir = await createWorkdir(uid);
+      await withWorkspace("submit", async (ws) => {
+        await ws.write(spec.filename, payload.code);
 
-      await fs.writeFile(
-        path.join(workDir, spec.filename),
-        payload.code,
-        "utf8",
-      );
-      // The source we just wrote is owned by root; hand it to the pool UID.
-      await chownTree(workDir, uid).catch((err) => {
-        logger.warn({ err, workDir }, "submit: chown tree failed; continuing");
-      });
-
-      // Cache key covers (language, source, compile argv). Interpreted
-      // languages (python3/pypy3) have no compile step, so they key on
-      // the empty array — matches the "no compile argv" semantics, and it
-      // is why two identical Python submissions share an entry.
-      const key = cacheKey(language, payload.code, spec.compileArgv ?? []);
-
-      const cachedDir = await compileCache.get(key);
-      if (cachedDir) {
-        // Copy cached artifact into workdir; re-chown to pool UID.
-        await fs.cp(cachedDir, workDir, { recursive: true, force: true });
-        await chownTree(workDir, uid).catch(() => {});
-      } else {
-        // Compilation runs OUTSIDE nsjail: this is the judge transforming
-        // source, not executing user-provided behaviour. The child still
-        // gets the four-variable env from `buildChildEnv` so a malicious
-        // `#include` or pragma cannot read host variables.
-        const compileRes: CompileResult =
-          spec.compileArgv === null
-            ? { ok: true }
-            : await runCompile(spec.compileArgv, workDir, buildChildEnv());
-        if (!compileRes.ok) {
-          // Compile fail → HTTP 200 with compileError per contract.
-          const response: SubmitResponse = {
-            summary: { total: 0, passed: 0, failed: 0 },
-            results: [],
-            effectiveMemoryLimitMb: memLimitMb,
-            compileError: compileRes.stderr,
-          };
-          res.status(200).json(response);
-          return;
-        }
-        // Successful compile → store in cache. Cache errors must not fail the submission.
-        await compileCache
-          .put(key, workDir)
-          .catch((err) => logger.warn({ err }, "submit: compile cache put failed"));
-        await chownTree(workDir, uid).catch(() => {});
-      }
-
-      // Custom checker: compiled ONCE per submission, never per case.
-      //
-      // Deliberately AFTER the compile-cache interaction above. The cache
-      // stores the whole workdir keyed on (language, user code, compile
-      // argv) — a checker binary present at `put()` time would be handed
-      // to a different problem whose contestant submitted the same
-      // source. Compiling here also means we skip the g++ run entirely
-      // when the user's own code already failed to compile.
-      if (checkerSource !== undefined) {
-        const checkerCompile = await compileChecker(workDir, checkerSource);
-        if (!checkerCompile.ok) {
-          // A broken checker is a PROBLEM-CONFIGURATION fault, not the
-          // user's. Same HTTP 200 + empty-summary shape as compileError,
-          // but a distinct field: wmoj-app turns `compileError` into a
-          // user-facing CE and must never blame the student for this.
-          logger.error(
-            { stderr: checkerCompile.stderr.slice(0, 2000) },
-            "submit: checker failed to compile",
-          );
-          const response: SubmitResponse = {
-            summary: { total: 0, passed: 0, failed: 0 },
-            results: [],
-            effectiveMemoryLimitMb: memLimitMb,
-            checkerError: checkerCompile.stderr,
-          };
-          res.status(200).json(response);
-          return;
-        }
-      }
-
-      // Per-submission limit: bound test-case parallelism within this
-      // submission. p-limit used as itself, exactly as `globalSemaphore.ts`
-      // does for the submission count -- the adapter that used to wrap it
-      // here existed for a substitution nothing ever made.
-      const limit = pLimit(config.PER_SUBMISSION_CONCURRENCY);
-
-      // First judge fault seen by any case. Set once, read by every case
-      // still queued behind it so they return immediately instead of
-      // spawning against a workdir that is about to be deleted.
-      let abortReason: Error | null = null;
-
-      const resultPromises = payload.input.map((rawInput, i) =>
-        limit(async (): Promise<CaseOutcome> => {
-          if (abortReason !== null) {
-            return { ok: false, error: abortReason };
-          }
-          try {
-            // An EMPTY input stays empty. `"".endsWith("\n")` is false,
-            // so the old form silently rewrote "no input at all" into a
-            // single blank line — a real difference to `sys.stdin.read()`
-            // and to `scanf`, and the mutated string is also what
-            // `runChecker` writes to the checker's input file.
-            const stdin =
-              rawInput.length === 0 || rawInput.endsWith("\n")
-                ? rawInput
-                : rawInput + "\n";
-            const expected = payload.output[i] ?? "";
-            const outcome = await runSandboxed({
-              argv: [...spec.runArgv],
-              cwd: workDir as string,
-              label: `submit:case${String(i)}`,
-              timeLimitMs,
-              memLimitMb,
-              stdin,
-            });
-
-            // A JUDGE fault: nsjail or the runner could not be spawned,
-            // nsjail bailed before executing anything (an unreadable or
-            // uncompilable `--seccomp_policy`, a missing `--cwd`), or no
-            // resource report survived. NOTHING of the user's code ran,
-            // so there is nothing to grade — throwing hands it to the
-            // route's `catch`, which returns the documented
-            // `500 {error}` "the judge is wrong" channel.
-            //
-            // This is the case that reproduced live: with an
-            // uncompilable seccomp policy nsjail exits 255 with its
-            // diagnostic on fd 3, so the child's stdout and stderr are
-            // both empty, `exitCode !== 0` held, and the judge graded
-            // EVERY case of EVERY submission `RE` on a clean HTTP 200
-            // while `/health` still reported `ok`. Deliberately not
-            // `IE`: `IE` is documented as checker-only.
-            if (!outcome.ok) {
-              throw new Error(
-                `sandbox failure on test case ${i}: ${outcome.sandboxError}`,
-              );
+        // INTERPRETED LANGUAGES SKIP THE CACHE ENTIRELY (there is no
+        // compile step to memoize). They used to key on the empty argv,
+        // so two identical Python submissions shared an entry — and a
+        // "hit" then cost a recursive copy plus a chown to save one
+        // `writeFile` of at most 100 KB, on a box with ~0.1 CPU. See
+        // `docs/adr/0004-interpreted-languages-bypass-the-compile-cache.md`.
+        if (spec.compileArgv !== null) {
+          const key = cacheKey(language, payload.code, spec.compileArgv);
+          const hit = await compileCache.get(key);
+          if (hit) {
+            await ws.copyIn(hit.dir, hit.artifacts);
+          } else {
+            // Compilation runs OUTSIDE nsjail: this is the judge
+            // transforming source, not executing user-provided
+            // behaviour. The child still gets the four-variable env from
+            // `buildChildEnv` so a malicious `#include` or pragma cannot
+            // read host variables.
+            const compileRes = await runCompile(
+              spec.compileArgv,
+              ws.dir,
+              buildChildEnv(),
+            );
+            if (!compileRes.ok) {
+              // Compile fail → HTTP 200 with compileError per contract.
+              const response: SubmitResponse = {
+                summary: { total: 0, passed: 0, failed: 0 },
+                results: [],
+                effectiveMemoryLimitMb: memLimitMb,
+                compileError: compileRes.stderr,
+              };
+              res.status(200).json(response);
+              return;
             }
-
-            // How this case's output is judged. `gradeCase` calls it ONLY
-            // when the program itself finished cleanly, which is what
-            // keeps a crashed or timed-out run from ever reaching the
-            // comparator or the checker — unchanged from before checkers
-            // existed.
-            const judge: Judge =
-              checkerSource === undefined
-                ? // No checker: the byte comparison the request selected.
-                  async (received) => ({
-                    passed: compare(compareMode, expected, received),
-                  })
-                : // A checker REPLACES compareMode — the string
-                  // comparison is not run at all when one is supplied.
-                  async (received) => {
-                    const checkerRun = await runChecker({
-                      workDir: workDir as string,
-                      index: i,
-                      input: stdin,
-                      expected,
-                      received,
-                    });
-                    // Same rule as above, one layer down: the checker's
-                    // own sandbox failing is the judge breaking, not the
-                    // problem being misconfigured, so it must not become
-                    // `IE` either. Throwing here rejects `gradeCase` and
-                    // lands in the task's `catch` below.
-                    if (!checkerRun.ok) {
-                      throw new Error(
-                        `checker sandbox failure on test case ${i}: ${checkerRun.sandboxError}`,
-                      );
-                    }
-                    const checkerVerdict = checkerRun.verdict;
-                    if (checkerVerdict.outcome === "internal-error") {
-                      logger.error(
-                        {
-                          index: i,
-                          exitCode: checkerVerdict.exitCode,
-                          message: checkerVerdict.message,
-                        },
-                        "submit: checker reported an internal error",
-                      );
-                      return {
-                        checkerFailed: true,
-                        checkerMessage: checkerVerdict.message,
-                      };
-                    }
-                    return {
-                      passed: checkerVerdict.outcome === "accepted",
-                      checkerMessage: checkerVerdict.message,
-                    };
-                  };
-
-            return {
-              ok: true,
-              result: await gradeCase(
-                { index: i, expected, run: outcome.run, limits },
-                judge,
-              ),
-            };
-          } catch (err) {
-            // Everything reaching here is the harness failing, never a
-            // verdict: a judge-fault throw from above, or an unexpected
-            // rejection (EMFILE, ENOSPC). It is deliberately NOT
-            // synthesised into a verdict — `RE` would blame the student
-            // for the judge, and `IE` is checker-only — so it aborts the
-            // submission instead. Resolving rather than rejecting is
-            // what guarantees every sibling task has settled before the
-            // route's `finally` removes the workdir and releases the UID.
-            const error = asError(err);
-            if (abortReason === null) abortReason = error;
-            return { ok: false, error };
+            // Successful compile → store the language's ARTIFACTS in the
+            // cache; nothing else in the workspace goes with them. Cache
+            // errors must not fail the submission.
+            await compileCache
+              .put(key, ws.dir, spec.artifacts)
+              .catch((err) => logger.warn({ err }, "submit: compile cache put failed"));
           }
-        }),
-      );
-
-      const settled = await Promise.allSettled(resultPromises);
-      const results: TestResult[] = [];
-      let caseFailure: Error | null = null;
-      for (const outcome of settled) {
-        if (outcome.status === "rejected") {
-          // Unreachable while the task above catches everything; kept so
-          // the settle-before-teardown guarantee does not depend on that.
-          caseFailure ??= asError(outcome.reason);
-        } else if (outcome.value.ok) {
-          results.push(outcome.value.result);
-        } else {
-          caseFailure ??= outcome.value.error;
         }
-      }
-      if (caseFailure !== null) throw caseFailure;
-      results.sort((a, b) => a.index - b.index);
 
-      const summary = {
-        total: results.length,
-        passed: results.filter((r) => r.passed).length,
-        failed: results.filter((r) => !r.passed).length,
-      };
+        // Custom checker: compiled ONCE per submission, never per case.
+        // Compiling here rather than earlier means the g++ run is
+        // skipped entirely when the user's own code failed to compile.
+        if (checkerSource !== undefined) {
+          const checkerCompile = await compileChecker(ws, checkerSource);
+          if (!checkerCompile.ok) {
+            // A broken checker is a PROBLEM-CONFIGURATION fault, not the
+            // user's. Same HTTP 200 + empty-summary shape as
+            // compileError, but a distinct field: wmoj-app turns
+            // `compileError` into a user-facing CE and must never blame
+            // the student for this.
+            logger.error(
+              { stderr: checkerCompile.stderr.slice(0, 2000) },
+              "submit: checker failed to compile",
+            );
+            const response: SubmitResponse = {
+              summary: { total: 0, passed: 0, failed: 0 },
+              results: [],
+              effectiveMemoryLimitMb: memLimitMb,
+              checkerError: checkerCompile.stderr,
+            };
+            res.status(200).json(response);
+            return;
+          }
+        }
 
-      const response: SubmitResponse = {
-        summary,
-        results,
-        effectiveMemoryLimitMb: memLimitMb,
-      };
-      res.status(200).json(response);
+        const out = await judgeAllCases(
+          productionJudgeDeps,
+          ws,
+          { argv: spec.runArgv, limits },
+          grading,
+          cases,
+          config.PER_SUBMISSION_CONCURRENCY,
+        );
+        // A judge fault. Every case has settled by the time this
+        // resolves, so throwing here cannot leave work running against
+        // the workspace the lease is about to tear down.
+        if (!out.ok) throw out.error;
+
+        const summary = {
+          total: out.results.length,
+          passed: out.results.filter((r) => r.passed).length,
+          failed: out.results.filter((r) => !r.passed).length,
+        };
+
+        const response: SubmitResponse = {
+          summary,
+          results: out.results,
+          effectiveMemoryLimitMb: memLimitMb,
+        };
+        res.status(200).json(response);
+      });
     } catch (err) {
       logger.error({ err }, "submit: unexpected failure");
       if (!res.headersSent) {
         res.status(500).json({ error: asError(err).message });
       }
-    } finally {
-      // Safe to tear down unconditionally: the only thing that can still
-      // be in flight at this point is nothing. Every per-case task
-      // resolves rather than rejects, and the route awaits all of them
-      // before it can reach here by any path.
-      if (workDir) await cleanupWorkdir(workDir);
-      if (uid !== null) releaseUid(uid);
     }
   });
 });
-
-/**
- * Recursively chown every entry under `dir` to `uid:uid`. Used after
- * the source is written so the sandboxed pool UID can read/execute what
- * Node (running as root) just wrote. No-op when Node is unprivileged
- * (see `isRootNode`).
- */
-async function chownTree(dir: string, uid: number): Promise<void> {
-  if (!isRootNode) return;
-  const entries = await fs.readdir(dir, { withFileTypes: true });
-  await fs.chown(dir, uid, uid).catch(() => {});
-  for (const entry of entries) {
-    const full = `${dir}/${entry.name}`;
-    await fs.chown(full, uid, uid).catch(() => {});
-    if (entry.isDirectory()) {
-      await chownTree(full, uid);
-    }
-  }
-}

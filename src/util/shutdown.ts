@@ -17,16 +17,24 @@ import { stopCompileCache } from "../cache/compileCache";
 const DRAIN_BUDGET_MS = 25_000;
 
 /**
- * Tracks in-flight judging work. Incremented by the `countInFlight`
- * gate in `server.ts`, mounted on `/submit` and `/generate-tests` only
- * so `/health` probes and unmatched paths never hold a deploy open.
- * Shutdown waits for this to hit zero or for the drain budget to run
- * out, whichever comes first.
+ * Tracks in-flight judging work. Shutdown waits for this to hit zero or
+ * for the drain budget to run out, whichever comes first.
  *
- * The gate keys on the response lifecycle, so today the count drops
- * when the *client* disconnects rather than when judging finishes; a
- * route that also brackets its own work with this pair would close
- * that gap, and the extra counting is harmless (see `countInFlight`).
+ * Incremented twice per judged request, by two brackets that answer
+ * different questions:
+ *
+ *  - the `countInFlight` gate in `server.ts`, mounted on `/submit` and
+ *    `/generate-tests` only so `/health` probes and unmatched paths
+ *    never hold a deploy open. It keys on the response lifecycle, so it
+ *    drops its count when the *client* disconnects — which a `curl`
+ *    that gives up fires while the sandbox is still running.
+ *  - `withWorkspace` (`src/workspace`), which brackets the JUDGING
+ *    itself: the lease of a directory, a pool slot and this counter.
+ *
+ * Double-counting is deliberate and safe: the drain waits for the
+ * counter to reach zero, so two brackets simply make it wait for the
+ * later of the two — which is the workspace's, and is the one that must
+ * not be interrupted mid-run.
  */
 let inFlight = 0;
 let draining = false;
@@ -48,6 +56,18 @@ export function exitRequest(): void {
 
 export function isDraining(): boolean {
   return draining;
+}
+
+/**
+ * How much judging work is in flight right now.
+ *
+ * Read by `test/unit/workspace.test.ts`, which asserts that a lease
+ * brackets this counter on both the success and the throw path — the
+ * property that makes a SIGTERM during a long submission wait for the
+ * grading instead of for the client's socket.
+ */
+export function inFlightCount(): number {
+  return inFlight;
 }
 
 /** Resolves once `inFlight` reaches zero. */

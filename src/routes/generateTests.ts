@@ -1,12 +1,9 @@
 import { Router, type Request, type Response } from "express";
-import { promises as fs } from "fs";
-import * as path from "path";
 import { runSandboxed } from "../sandbox/nsjail";
-import { acquireUid, releaseUid } from "../queue/uidPoolSingleton";
 import { buildChildEnv } from "../sandbox/minimalEnv";
 import { setterCompileArgv } from "../languages";
 import { runCompile, type CompileResult } from "../util/compile";
-import { createWorkdir, cleanupWorkdir, isRootNode } from "../util/workdir";
+import { withWorkspace } from "../workspace";
 import { logger } from "../util/logger";
 import { isDraining } from "../util/shutdown";
 import {
@@ -102,7 +99,7 @@ function budgetViolationBody(v: BudgetViolation): Record<string, unknown> {
   }
 }
 
-/** The generator's source and binary inside the workdir. */
+/** The generator's source and binary inside the workspace. */
 const GENERATOR_SOURCE_FILENAME = "Generator.cpp";
 const GENERATOR_BINARY_FILENAME = "gen.out";
 
@@ -114,7 +111,7 @@ const GENERATOR_BINARY_FILENAME = "gen.out";
  * boundary as the checker's) but uses `minimalEnv` to scrub the child
  * environment.
  *
- * The names are relative to the workdir, which is the child's cwd, so a
+ * The names are relative to the workspace, which is the child's cwd, so a
  * diagnostic in the 400 below reads `Generator.cpp:3:1: error:` rather
  * than naming the judge's `/tmp/judge-<nanoid>` path back to the admin.
  */
@@ -199,148 +196,141 @@ generateTestsRouter.post("/", async (req: Request, res: Response) => {
     "generate-tests: start",
   );
 
-  let uid: number | null = null;
-  let workDir: string | null = null;
-
   try {
-    uid = await acquireUid();
-    workDir = await createWorkdir(uid);
+    await withWorkspace("generator", async (ws) => {
+      await ws.write(GENERATOR_SOURCE_FILENAME, code);
 
-    const srcPath = path.join(workDir, GENERATOR_SOURCE_FILENAME);
-    const outPath = path.join(workDir, GENERATOR_BINARY_FILENAME);
-    await fs.writeFile(srcPath, code, "utf8");
-    // Make sure the pool UID can read the source and write the binary.
-    // Only meaningful when Node runs as root; under unprivileged Node
-    // (Render) the files are already owned by the running UID.
-    if (isRootNode) await fs.chown(srcPath, uid, uid).catch(() => {});
+      const compileRes = await compileGenerator(ws.dir);
+      if (!compileRes.ok) {
+        res.status(400).json({ error: `Compilation failed\n${compileRes.stderr}` });
+        return;
+      }
 
-    const compileRes = await compileGenerator(workDir);
-    if (!compileRes.ok) {
-      res.status(400).json({ error: `Compilation failed\n${compileRes.stderr}` });
-      return;
-    }
-    if (isRootNode) await fs.chown(outPath, uid, uid).catch(() => {});
+      const outcome = await runSandboxed({
+        argv: [`./${GENERATOR_BINARY_FILENAME}`],
+        cwd: ws.dir,
+        label: ws.label,
+        timeLimitMs: GENERATOR_TIME_LIMIT_MS,
+        memLimitMb: GENERATOR_MEM_LIMIT_MB,
+        stdin: "",
+        // A generator's stdout IS the payload (the JSON array of inputs) and its
+        // stderr IS the expected outputs — unlike /submit, where both are just a
+        // program's incidental chatter. `runSandboxed`'s defaults are sized for
+        // /submit (1 MiB stdout, 64 KiB stderr) and would silently TRUNCATE a
+        // legitimate generator mid-array, producing a JSON parse failure that
+        // looks like a bug in the admin's generator rather than a judge cap.
+        //
+        // These are sized above what the caps below will accept anyway
+        // (MAX_INPUT_CASES x MAX_INPUT_BYTES_PER_CASE), so a generator that
+        // overshoots is rejected by an explicit 400 naming the limit it broke
+        // rather than by silent truncation.
+        maxStdoutBytes: GENERATOR_MAX_OUTPUT_BYTES,
+        maxStderrBytes: GENERATOR_MAX_OUTPUT_BYTES,
+      });
 
-    const outcome = await runSandboxed({
-      argv: [`./${GENERATOR_BINARY_FILENAME}`],
-      cwd: workDir,
-      label: "generator",
-      timeLimitMs: GENERATOR_TIME_LIMIT_MS,
-      memLimitMb: GENERATOR_MEM_LIMIT_MB,
-      stdin: "",
-      // A generator's stdout IS the payload (the JSON array of inputs) and its
-      // stderr IS the expected outputs — unlike /submit, where both are just a
-      // program's incidental chatter. `runSandboxed`'s defaults are sized for
-      // /submit (1 MiB stdout, 64 KiB stderr) and would silently TRUNCATE a
-      // legitimate generator mid-array, producing a JSON parse failure that
-      // looks like a bug in the admin's generator rather than a judge cap.
-      //
-      // These are sized above what the caps below will accept anyway
-      // (MAX_INPUT_CASES x MAX_INPUT_BYTES_PER_CASE), so a generator that
-      // overshoots is rejected by an explicit 400 naming the limit it broke
-      // rather than by silent truncation.
-      maxStdoutBytes: GENERATOR_MAX_OUTPUT_BYTES,
-      maxStderrBytes: GENERATOR_MAX_OUTPUT_BYTES,
+      if (!outcome.ok) {
+        // Nothing of the generator's code ran — this is a judge fault, not a
+        // problem with the admin's source, so it must not surface as a 400
+        // blaming the generator.
+        throw new Error(`sandbox failure: ${outcome.sandboxError}`);
+      }
+      const run = outcome.run;
+
+      // "Did the generator finish?", spelled from raw facts rather than
+      // from a kill class. The verdict module's ladder is about grading a
+      // SUBMISSION against a problem's limits; this route has neither, and
+      // asking it would import a threshold that means nothing here. A
+      // generator either exited 0 under its own power or it did not.
+      if (run.exitCode !== 0 || run.runnerSignal !== null || run.nodeTimerFired) {
+        // CONTRACT NOTE. This text changed with the verdict refactor: it was
+        // `Generator exited with code N (TO|SIG|ok)`, where the parenthesis
+        // was the sandbox's kill class, and it is now the code plus a plain
+        // clause for each thing that could have ended the run. `wmoj-app`
+        // displays this string verbatim to an admin and does not parse it,
+        // so the change is cosmetic there — but it IS the response body of a
+        // documented 400, so it is pinned by a golden transcript and must
+        // not drift again without saying so here.
+        const killNote = run.nodeTimerFired
+          ? " (killed by the judge after the time limit)"
+          : run.runnerSignal !== null
+            ? ` (signal ${run.runnerSignal})`
+            : "";
+        res.status(400).json({
+          error: `Generator exited with code ${run.exitCode}${killNote}`,
+          inputJson: run.stdout,
+          outputJson: run.stderr,
+        });
+        return;
+      }
+
+      const inputRaw = run.stdout;
+      const outputRaw = run.stderr;
+
+      let inputArr: unknown;
+      let outputArr: unknown;
+      try {
+        inputArr = JSON.parse(inputRaw);
+      } catch (e) {
+        res.status(400).json({
+          error: `Invalid JSON on stdout: ${(e as Error).message}`,
+          inputJson: inputRaw,
+          outputJson: outputRaw,
+        });
+        return;
+      }
+      try {
+        outputArr = JSON.parse(outputRaw);
+      } catch (e) {
+        res.status(400).json({
+          error: `Invalid JSON on stderr: ${(e as Error).message}`,
+          inputJson: inputRaw,
+          outputJson: outputRaw,
+        });
+        return;
+      }
+
+      if (!Array.isArray(inputArr) || !Array.isArray(outputArr)) {
+        res.status(400).json({
+          error: "Both stdout and stderr must be JSON arrays",
+          inputJson: inputRaw,
+          outputJson: outputRaw,
+        });
+        return;
+      }
+      if (inputArr.length !== outputArr.length) {
+        res.status(400).json({
+          error: "Input and output arrays must be the same length",
+          inputJson: inputRaw,
+          outputJson: outputRaw,
+        });
+        return;
+      }
+
+      const input = inputArr.map(coerceToString);
+      const output = outputArr.map(coerceToString);
+
+      // Enforce the caps /submit will enforce on this same data, on the
+      // coerced strings that are what actually goes back over the wire.
+      // A size complaint deliberately does NOT echo inputJson/outputJson
+      // the way the parse failures above do: those need the raw text to
+      // be diagnosable, this one is already too big by definition.
+      const budget = fitsTestDataBudget(input, output, SUBMISSION_SOURCE_HEADROOM_BYTES);
+      if (!budget.ok) {
+        res.status(400).json(budgetViolationBody(budget.violation));
+        return;
+      }
+
+      res.json({ inputJson: inputRaw, outputJson: outputRaw, input, output });
     });
-
-    if (!outcome.ok) {
-      // Nothing of the generator's code ran — this is a judge fault, not a
-      // problem with the admin's source, so it must not surface as a 400
-      // blaming the generator.
-      throw new Error(`sandbox failure: ${outcome.sandboxError}`);
-    }
-    const run = outcome.run;
-
-    // "Did the generator finish?", spelled from raw facts rather than
-    // from a kill class. The verdict module's ladder is about grading a
-    // SUBMISSION against a problem's limits; this route has neither, and
-    // asking it would import a threshold that means nothing here. A
-    // generator either exited 0 under its own power or it did not.
-    if (run.exitCode !== 0 || run.runnerSignal !== null || run.nodeTimerFired) {
-      // CONTRACT NOTE. This text changed with the verdict refactor: it was
-      // `Generator exited with code N (TO|SIG|ok)`, where the parenthesis
-      // was the sandbox's kill class, and it is now the code plus a plain
-      // clause for each thing that could have ended the run. `wmoj-app`
-      // displays this string verbatim to an admin and does not parse it,
-      // so the change is cosmetic there — but it IS the response body of a
-      // documented 400, so it is pinned by a golden transcript and must
-      // not drift again without saying so here.
-      const killNote = run.nodeTimerFired
-        ? " (killed by the judge after the time limit)"
-        : run.runnerSignal !== null
-          ? ` (signal ${run.runnerSignal})`
-          : "";
-      res.status(400).json({
-        error: `Generator exited with code ${run.exitCode}${killNote}`,
-        inputJson: run.stdout,
-        outputJson: run.stderr,
-      });
-      return;
-    }
-
-    const inputRaw = run.stdout;
-    const outputRaw = run.stderr;
-
-    let inputArr: unknown;
-    let outputArr: unknown;
-    try {
-      inputArr = JSON.parse(inputRaw);
-    } catch (e) {
-      res.status(400).json({
-        error: `Invalid JSON on stdout: ${(e as Error).message}`,
-        inputJson: inputRaw,
-        outputJson: outputRaw,
-      });
-      return;
-    }
-    try {
-      outputArr = JSON.parse(outputRaw);
-    } catch (e) {
-      res.status(400).json({
-        error: `Invalid JSON on stderr: ${(e as Error).message}`,
-        inputJson: inputRaw,
-        outputJson: outputRaw,
-      });
-      return;
-    }
-
-    if (!Array.isArray(inputArr) || !Array.isArray(outputArr)) {
-      res.status(400).json({
-        error: "Both stdout and stderr must be JSON arrays",
-        inputJson: inputRaw,
-        outputJson: outputRaw,
-      });
-      return;
-    }
-    if (inputArr.length !== outputArr.length) {
-      res.status(400).json({
-        error: "Input and output arrays must be the same length",
-        inputJson: inputRaw,
-        outputJson: outputRaw,
-      });
-      return;
-    }
-
-    const input = inputArr.map(coerceToString);
-    const output = outputArr.map(coerceToString);
-
-    // Enforce the caps /submit will enforce on this same data, on the
-    // coerced strings that are what actually goes back over the wire.
-    // A size complaint deliberately does NOT echo inputJson/outputJson
-    // the way the parse failures above do: those need the raw text to
-    // be diagnosable, this one is already too big by definition.
-    const budget = fitsTestDataBudget(input, output, SUBMISSION_SOURCE_HEADROOM_BYTES);
-    if (!budget.ok) {
-      res.status(400).json(budgetViolationBody(budget.violation));
-      return;
-    }
-
-    res.json({ inputJson: inputRaw, outputJson: outputRaw, input, output });
   } catch (err) {
     logger.error({ err }, "generate-tests: unexpected failure");
-    res.status(500).json({ error: (err as Error).message });
-  } finally {
-    if (workDir) await cleanupWorkdir(workDir);
-    if (uid !== null) releaseUid(uid);
+    // `headersSent` because the only throw that can reach here after a
+    // response has gone out is the workspace teardown's, and a second
+    // `res.status()` on a sent response throws again — out of an async
+    // Express handler with no error middleware, which is an unhandled
+    // rejection, not a 500.
+    if (!res.headersSent) {
+      res.status(500).json({ error: (err as Error).message });
+    }
   }
 });

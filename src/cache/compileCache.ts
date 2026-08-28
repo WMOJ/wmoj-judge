@@ -24,19 +24,24 @@ export function cacheKey(
 }
 
 interface CacheEntry {
-  /** Absolute path to the directory holding the cached artifact. */
+  /** Absolute path to the directory holding the cached artifacts. */
   dir: string;
+  /** The names stored under `dir` — the artifact list `put` was given. */
+  artifacts: readonly string[];
   /** Epoch millis at which this entry expires and becomes evictable. */
   expiresAt: number;
 }
 
 /**
- * Copy a directory tree. Used to seed a submission workdir from a
- * cached artifact directory. Relies on Node's native recursive cp
- * (available since 16.7) — no external deps.
+ * A live cache entry: where the artifacts are, and which ones.
+ *
+ * The names come back with the directory because the cache is the only
+ * thing that knows what it stored, and a caller that had to guess would
+ * be back to copying the whole tree.
  */
-async function copyDir(src: string, dst: string): Promise<void> {
-  await fs.cp(src, dst, { recursive: true, force: true });
+export interface CacheHit {
+  readonly dir: string;
+  readonly artifacts: readonly string[];
 }
 
 /**
@@ -65,11 +70,11 @@ export class DiskCompileCache {
   }
 
   /**
-   * Return the path to a cached artifact directory for `key`, or null
-   * if there is no live entry. Callers should copy the contents into
-   * their own workdir; the cache directory must not be mutated.
+   * Return the cached artifacts for `key`, or null if there is no live
+   * entry. Callers copy the named files into their own workspace; the
+   * cache directory must not be mutated.
    */
-  async get(key: string): Promise<string | null> {
+  async get(key: string): Promise<CacheHit | null> {
     await this.ensureBase();
     const entry = this.entries.get(key);
     if (!entry) return null;
@@ -78,10 +83,10 @@ export class DiskCompileCache {
       await fs.rm(entry.dir, { recursive: true, force: true }).catch(() => {});
       return null;
     }
-    // A live map entry is not proof the artifact is still on disk: the
+    // A live map entry is not proof the artifacts are still on disk: the
     // eviction sweep, a `put()` that failed part-way, or anything else
     // with write access to /tmp can remove the directory underneath it.
-    // The caller's next move is `fs.cp()` from this path, which rejects
+    // The caller's next move is a copy out of this path, which rejects
     // ENOENT and turns a submission that compiled perfectly into a 500 —
     // or, worse, copies a partially-removed tree and grades every case
     // `RE` on a clean 200. A missing directory must be a cache MISS, so
@@ -92,17 +97,26 @@ export class DiskCompileCache {
       this.entries.delete(key);
       return null;
     }
-    return entry.dir;
+    return { dir: entry.dir, artifacts: entry.artifacts };
   }
 
   /**
-   * Copy `artifactDir` into the cache under `key` and return the cached
-   * path.
+   * Copy ONLY `artifacts` out of `fromDir` into the cache under `key`,
+   * and return the cached path.
+   *
+   * Anything else in the workspace — a checker binary, the source, the
+   * per-case scratch files — never enters the cache. It used to store
+   * the whole workdir, which is why `compileChecker` carried a "MUST be
+   * called after `put()`" ordering constraint: a `checker.out` present
+   * at `put()` time was handed to a different problem whose contestant
+   * submitted the same source, and that problem was then graded by the
+   * wrong checker. A named list removes the hazard instead of
+   * documenting it.
    *
    * Atomic staging: write into a temp dir, then rename it into place.
-   * Concurrent readers (`fs.cp` from the cache path in
+   * Concurrent readers (`copyIn` from the cache path in
    * routes/submit.ts) therefore see either no entry at all or one
-   * complete artifact, never a half-populated directory.
+   * complete set of artifacts, never a half-populated directory.
    *
    * `key` is a content hash of (language, source, compile argv), so
    * whatever already sits at `dst` is byte-identical to what we just
@@ -117,7 +131,11 @@ export class DiskCompileCache {
    * 15-minute TTL with no self-healing. The loser of the race discards
    * its own staging directory and adopts the winner's tree.
    */
-  async put(key: string, artifactDir: string): Promise<string> {
+  async put(
+    key: string,
+    fromDir: string,
+    artifacts: readonly string[],
+  ): Promise<string> {
     await this.ensureBase();
     const dst = path.join(this.baseDir, key);
     const tmp = path.join(
@@ -125,7 +143,18 @@ export class DiskCompileCache {
       `${key}.tmp-${randomBytes(8).toString("hex")}`,
     );
     try {
-      await copyDir(artifactDir, tmp);
+      await fs.mkdir(tmp, { recursive: true, mode: 0o700 });
+      for (const name of artifacts) {
+        // `recursive` so an artifact that is a directory (none today —
+        // `languages.json` declares `a.out`) is stored whole rather
+        // than rejected. A missing artifact rejects, which is the
+        // `catch` below: a cache entry that promises a binary it does
+        // not have would grade every case `RE` on a clean 200.
+        await fs.cp(path.join(fromDir, name), path.join(tmp, name), {
+          recursive: true,
+          force: true,
+        });
+      }
       try {
         await fs.rename(tmp, dst);
       } catch (err) {
@@ -146,7 +175,11 @@ export class DiskCompileCache {
       this.entries.delete(key);
       throw err;
     }
-    this.entries.set(key, { dir: dst, expiresAt: Date.now() + this.ttlMs });
+    this.entries.set(key, {
+      dir: dst,
+      artifacts: [...artifacts],
+      expiresAt: Date.now() + this.ttlMs,
+    });
     return dst;
   }
 

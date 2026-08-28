@@ -2,18 +2,14 @@ import { createUidPool } from "../sandbox/uidPool";
 import { config } from "../config";
 
 /**
- * Process-wide UID pool singleton. Every route that spawns user code
- * (/submit, /generate-tests) pulls its pool UID from here so the pool
- * size is honored across all concurrent requests.
+ * Process-wide UID pool singleton, and the judge's true concurrency
+ * ceiling: it is the one throttle that covers both gated endpoints.
  *
- * The pool itself lives in `src/sandbox/uidPool.ts` (teammate A); this
- * module just constructs the single instance at import time so callers
- * don't have to juggle it.
+ * Its only consumer is the workspace lease (`src/workspace`), which
+ * acquires a slot for the life of a submission and releases it in a
+ * `finally`. The two convenience re-exports that used to live here went
+ * with the hand-assembled leases in the routes: a slot is never held
+ * without the directory and the in-flight bracket that go with it, so
+ * there is nothing left to acquire one on its own for.
  */
 export const uidPool = createUidPool(config.UID_POOL_SIZE);
-
-/** Convenience re-export so callers don't go through `uidPool.` twice. */
-export const acquireUid = (): Promise<number> => uidPool.acquire();
-
-/** Convenience re-export matching `acquireUid`. */
-export const releaseUid = (uid: number): void => uidPool.release(uid);

@@ -57,6 +57,14 @@ floor) || 256, ceiling)))`.
 it, from the same answer.
 _Avoid_: request caps (for the decision; `requestCaps` is only the middleware)
 
+**Workspace**: The leased per-submission directory plus its pool UID and in-flight bracket, held
+for exactly the duration of `withWorkspace`'s callback (`src/workspace`). Teardown begins the
+instant the callback settles.
+_Avoid_: workdir (for the lease; `createWorkdir` is only the directory)
+
+**Artifact**: A file a compile step produces and the compile cache stores, named by the language
+spec (`a.out`). Nothing else in a workspace ever enters the cache.
+
 **Drain**: The 25 s window after `SIGTERM` in which routes 503 and in-flight work finishes.
 
 **Liveness**: Whether the judge can grade correctly right now — one list of checks in

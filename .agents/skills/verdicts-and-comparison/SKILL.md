@@ -40,7 +40,7 @@ Two things about `judge` are load-bearing:
   the judge and returning `checkerFailed` would turn the judge's own machinery breaking into `IE`,
   a problem-configuration fault billed to a problem that is fine.
 
-`submit.ts` builds the judge per case: `compare(compareMode, expected, received)` with no checker,
+`judgeCase` (`src/judge/judgeCase.ts`) builds the judge per case: `compare(compareMode, expected, received)` with no checker,
 or `runChecker(...)` with one. `captureMeasurements` uses a `trim-trailing` judge.
 
 ## A judge fault is never a verdict
@@ -343,7 +343,7 @@ suite the whole time.
   the jailed process. Decode the exit status with `decodeJailExit`.
 - Never call the judge on a run that did not finish cleanly, and never catch a judge's throw inside
   `gradeCase`.
-- Never let a per-case task reject. They resolve a discriminated `CaseOutcome`, the route
+- Never let a per-case task reject. They resolve a discriminated `CaseOutcome`, `judgeAllCases`
   `allSettled`s **all** of them, and only then decides between a 200 and a throw. `Promise.all`'s
   first-rejection behaviour tore down the workdir and released the UID while up to 199 queued tasks
   were still spawning nsjail against that deleted directory under a reissued UID, outside the

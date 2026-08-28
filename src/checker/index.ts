@@ -1,5 +1,4 @@
 import { constants as fsConstants, promises as fs } from "fs";
-import * as path from "path";
 import { nanoid } from "nanoid";
 import type { RunMeasurement } from "../types";
 import { runSandboxed } from "../sandbox/nsjail";
@@ -7,6 +6,7 @@ import { decodeJailExit } from "../sandbox/exitStatus";
 import { buildChildEnv } from "../sandbox/minimalEnv";
 import { setterCompileArgv } from "../languages";
 import { runCompile } from "../util/compile";
+import type { Workspace } from "../workspace";
 
 /**
  * Custom checkers — for problems whose answer is not unique ("output any
@@ -14,7 +14,7 @@ import { runCompile } from "../util/compile";
  *
  * A checker is a C++ program compiled ONCE per submission and invoked
  * once per test case with three real file paths in the submission's
- * workdir:
+ * workspace:
  *
  *   checker.out <input_file> <expected_file> <contestant_output_file>
  *
@@ -35,10 +35,10 @@ import { runCompile } from "../util/compile";
  * never describe the argument order as "the testlib convention".
  */
 
-/** Source file the checker is written to inside the workdir. */
+/** Source file the checker is written to inside the workspace. */
 export const CHECKER_SOURCE_FILENAME = "Checker.cpp";
 
-/** Compiled checker binary inside the workdir. */
+/** Compiled checker binary inside the workspace. */
 export const CHECKER_BINARY_FILENAME = "checker.out";
 
 /**
@@ -119,11 +119,11 @@ export type CheckerRun =
  * boundary, it is problem-setter source, not contestant source — but
  * still with a scrubbed child env.
  *
- * MUST be called after the compile cache has been populated for this
- * submission: the cache stores the whole workdir keyed on (language,
- * user code, compile argv), so a checker binary sitting in the workdir
- * at `put()` time would be served to a different problem that happens
- * to share the user's source.
+ * Ordering against the compile cache no longer matters: `put()` copies
+ * only the artifacts the language declares, so a `checker.out` sitting
+ * in the workspace can never enter a cache entry keyed on someone
+ * else's source. This used to carry a "MUST be called after the cache
+ * has been populated" constraint for exactly that reason.
  *
  * Every failure path — including writing `Checker.cpp` — resolves
  * `{ok:false, stderr}` rather than rejecting. An `ENOSPC` on the shared
@@ -132,14 +132,11 @@ export type CheckerRun =
  * `checkerError`.
  */
 export async function compileChecker(
-  workDir: string,
+  ws: Workspace,
   source: string,
 ): Promise<{ ok: true; binaryPath: string } | { ok: false; stderr: string }> {
-  const srcPath = path.join(workDir, CHECKER_SOURCE_FILENAME);
-  const outPath = path.join(workDir, CHECKER_BINARY_FILENAME);
-
   try {
-    await fs.writeFile(srcPath, source, "utf8");
+    await ws.write(CHECKER_SOURCE_FILENAME, source);
   } catch (err) {
     return {
       ok: false,
@@ -149,10 +146,12 @@ export async function compileChecker(
 
   const result = await runCompile(
     setterCompileArgv(CHECKER_SOURCE_FILENAME, CHECKER_BINARY_FILENAME),
-    workDir,
+    ws.dir,
     buildChildEnv(),
   );
-  return result.ok ? { ok: true, binaryPath: outPath } : result;
+  return result.ok
+    ? { ok: true, binaryPath: ws.path(CHECKER_BINARY_FILENAME) }
+    : result;
 }
 
 /**
@@ -258,8 +257,8 @@ export function classifyCheckerResult(run: RunMeasurement): CheckerVerdict {
 }
 
 export interface RunCheckerOpts {
-  /** Submission workdir; the compiled `checker.out` lives here. */
-  workDir: string;
+  /** The submission's workspace; the compiled `checker.out` lives in it. */
+  ws: Workspace;
   /** Test-case index. Appears in the scratch filenames for readability. */
   index: number;
   /** Exactly the bytes the contestant's program received on stdin. */
@@ -273,12 +272,12 @@ export interface RunCheckerOpts {
 /**
  * Run the compiled checker against one test case.
  *
- * Writes the three files into the workdir, invokes
+ * Writes the three files into the workspace, invokes
  * `./checker.out <in> <exp> <out>` under nsjail with the checker's own
  * limits, then removes the scratch files (200 cases x up to 1 MB each
  * would otherwise pile up on a 512 MB host's /tmp).
  *
- * Paths are passed relative to the workdir, which nsjail sets as the
+ * Paths are passed relative to the workspace, which nsjail sets as the
  * child's cwd — same convention as the `./a.out` run command, and it
  * keeps working if a chroot is ever reinstated. **`argv[2]` is the
  * EXPECTED answer and `argv[3]` is the contestant's output — the
@@ -309,25 +308,22 @@ export interface RunCheckerOpts {
  * caller cannot read past without looking, for the caller to throw on.
  */
 export async function runChecker(opts: RunCheckerOpts): Promise<CheckerRun> {
+  const ws = opts.ws;
   const token = nanoid(10);
   const inName = `checker-${opts.index}-${token}-input.txt`;
   const expName = `checker-${opts.index}-${token}-expected.txt`;
   const outName = `checker-${opts.index}-${token}-received.txt`;
-  const files = [inName, expName, outName].map((n) => path.join(opts.workDir, n));
 
   try {
-    await fs.access(
-      path.join(opts.workDir, CHECKER_BINARY_FILENAME),
-      fsConstants.X_OK,
-    );
+    await fs.access(ws.path(CHECKER_BINARY_FILENAME), fsConstants.X_OK);
 
-    await fs.writeFile(path.join(opts.workDir, inName), opts.input, "utf8");
-    await fs.writeFile(path.join(opts.workDir, expName), opts.expected, "utf8");
-    await fs.writeFile(path.join(opts.workDir, outName), opts.received, "utf8");
+    await ws.write(inName, opts.input);
+    await ws.write(expName, opts.expected);
+    await ws.write(outName, opts.received);
 
     const outcome = await runSandboxed({
       argv: [`./${CHECKER_BINARY_FILENAME}`, inName, expName, outName],
-      cwd: opts.workDir,
+      cwd: ws.dir,
       label: `checker:case${String(opts.index)}`,
       timeLimitMs: CHECKER_TIME_LIMIT_MS,
       memLimitMb: CHECKER_MEM_LIMIT_MB,
@@ -352,15 +348,11 @@ export async function runChecker(opts: RunCheckerOpts): Promise<CheckerRun> {
       },
     };
   } finally {
-    // `recursive` because the scratch path could be a directory: an
+    // Every un-removed case leaves up to 3 MB behind on a 512 MB host's
+    // /tmp for the remaining life of the submission. `ws.remove` is
+    // tolerant of a scratch path that became a directory — an
     // unguessable name makes that unreachable for a contestant, but a
-    // plain `fs.rm` without it cannot remove one at all, and every
-    // un-removed case leaves up to 3 MB behind on a 512 MB host's /tmp
-    // for the remaining life of the submission.
-    await Promise.all(
-      files.map((f) =>
-        fs.rm(f, { force: true, recursive: true }).catch(() => {}),
-      ),
-    );
+    // removal that cannot remove one at all is not a safety net.
+    await ws.remove([inName, expName, outName]);
   }
 }

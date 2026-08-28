@@ -90,13 +90,13 @@ once ran only at boot) every 5 min; boot runs all five. `200 {status,version,sec
 
 ## Size caps and the memory clamp
 
-Decided in `src/budget` (one walk, UTF-8 `Buffer.byteLength`) and enforced by `requestCaps` (413) and
+Decided in `src/budget` (one walk, UTF-8 bytes) and enforced by `requestCaps` (413) and
 `/generate-tests` (400) from that same walk: **200** cases, **1,000,000** bytes per input and per
-expected output, 100,000 per source and per checker, and an **aggregate** `MAX_TOTAL_REQUEST_BYTES` =
-16 MiB over `code + checker + Σinput + Σoutput`. `JSON_BODY_LIMIT` is `"32mb"`, 2× the aggregate, in
-the same module, asserted by `test/unit/budget.test.ts`, so the parser limit can never again sit
-*below* the largest legal payload — it used to, by 1.53×, so a legal max-size body got Express's
-HTML 413. Changing any cap means changing `wmoj-app`'s `judge.sh` constants in the same commit.
+expected output, 100,000 per source and per checker, and an **aggregate** `MAX_TOTAL_REQUEST_BYTES`
+= 16 MiB over `code + checker + Σinput + Σoutput`. `JSON_BODY_LIMIT` is `"32mb"`, 2× the aggregate,
+in the same module, asserted by `test/unit/budget.test.ts`, so the parser limit can never again sit
+*below* the largest legal payload — it used to, so a legal max-size body got Express's HTML 413.
+Changing any cap means changing `wmoj-app`'s `judge.sh` constants in the same commit.
 
 Every submission's cap is clamped to `min(requested, HOST_MEMORY_CEILING_MB)` — **384**, not 512:
 Node and the compile cache share the same 512 MB, so a ceiling equal to the box means the OOM-killer
@@ -125,7 +125,6 @@ uts, cgroup), chroot, `--user`/`--group`, cgroups.
 - **Resource accounting comes from `wmoj-jailrun`**, a small C wrapper built into the image that
   execs nsjail, `wait4()`s it with `rusage`, and reports over a `FD_CLOEXEC` fd the jailed program
   cannot reach — nsjail 3.3 emits **no** rusage.
-- `tini` is PID 1, so orphaned descendants are reaped instead of accumulating against the shared UID.
 - Every flag, rlimit, and seccomp rule prevents one specific failure → **`sandbox-changes`**.
 
 ## Verdicts
@@ -157,9 +156,11 @@ Three throttles: `submitSemaphore` (p-limit at `max(1, min(cpuCount, ceiling/256
 `os.cpus().length`, which inside a container reads the *host's* CPU count; **`/submit` only**), a
 per-submission pool (**1 = serial**, deliberate — parallel runs on shared vCPUs made TLE
 non-deterministic), and the **16-UID pool, which is the true ceiling** and covers both gated
-endpoints. All in-process promise scheduling — no worker_threads, no queue workers. Backpressure is
-**queue-never-reject**: no depth cap, no timeout, no disconnect handling; a burst past the rate
-limiter queues indefinitely with the connection held open.
+endpoints — both lease it through `withWorkspace`, which also brackets the in-flight counter so a
+client disconnect no longer drops the count mid-judging. All in-process promise scheduling — no
+worker_threads, no queue workers. Backpressure is **queue-never-reject**: no depth cap, no timeout,
+no disconnect handling; a burst past the rate limiter queues indefinitely with the connection held
+open.
 
 `src/config.ts` is the env boundary — everything else imports the frozen `config`; `.env.example`
 documents every variable. One exception: `sandbox/minimalEnv.ts` reads `process.env.PATH`. **A
