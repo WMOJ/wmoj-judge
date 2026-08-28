@@ -62,8 +62,9 @@ interface Executor {
 
 Read everything from `languages.json` — `createCppExecutor(standard)` is the model. `compile()` for
 an interpreted language resolves `{ok: true}` without spawning anything. Compilation runs **outside
-nsjail** with a scrubbed env from `buildChildEnv`; note that `buildChildEnv(_lang)` ignores its
-argument entirely and returns the same four variables for every language.
+nsjail** with a scrubbed env from `buildChildEnv()`, which takes no argument and returns the same
+four variables for every language. It used to accept a `lang` it ignored; if a language ever needs
+its own env, add the parameter back and make it mean something rather than reinstating the lie.
 
 **4. Add the `case` to `executorFor` in `src/executors/index.ts`.** Compile-enforced: the `default`
 branch assigns to `const _exhaustive: never`, so a missing case is a build error.

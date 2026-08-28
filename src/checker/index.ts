@@ -155,7 +155,7 @@ export async function compileChecker(
   const result = await runCompile(
     ["/usr/bin/g++", "-O2", "-std=gnu++17", srcPath, "-o", outPath],
     workDir,
-    buildChildEnv("cpp17"),
+    buildChildEnv(),
   );
   return result.ok ? { ok: true, binaryPath: outPath } : result;
 }

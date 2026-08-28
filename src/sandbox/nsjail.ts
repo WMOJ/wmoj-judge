@@ -472,7 +472,7 @@ export async function runSandboxed(
   // them to the jailed child via `--env <VAR>` (name-only form).
   // Nothing else from the judge's own env leaks through. The runner
   // execs nsjail directly, so it changes nothing about this.
-  const jailEnv = buildChildEnv("python3");
+  const jailEnv = buildChildEnv();
 
   const started = Date.now();
   // Five stdio slots: stdin (0), child stdout (1), child stderr (2), a

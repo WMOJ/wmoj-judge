@@ -8,7 +8,6 @@ import { isDraining } from "../util/shutdown";
 import { buildChildEnv } from "../sandbox/minimalEnv";
 import { runSandboxed } from "../sandbox/nsjail";
 import languages from "../../languages.json";
-import type { Language } from "../types";
 
 /**
  * A single liveness check. Resolves to `null` when the dependency is
@@ -25,14 +24,17 @@ interface HealthCheck {
  * One toolchain probe: the binary to run and the version flag. Passes
  * if the process exits 0 within `PROBE_TIMEOUT_MS`.
  *
- * `envLang` selects which language-flavoured env map buildChildEnv
- * produces for the spawn — keeps every spawn going through the same
- * scrub path as user code (no leaking the judge's full process.env).
+ * The spawn takes its environment from `buildChildEnv()`, the same
+ * four-variable allow-list user code gets, so a probe cannot pass on a
+ * PATH or locale the real run would never see — and the judge's own
+ * process.env never leaks into it. There is deliberately no per-probe env
+ * knob: `buildChildEnv` builds one env for every language, and this
+ * interface used to carry an `envLang` field advertising a
+ * "language-flavoured env map" that the function ignored.
  */
 interface ToolchainProbe {
   bin: string;
   args: string[];
-  envLang: Language;
 }
 
 /**
@@ -100,7 +102,7 @@ function runToolchainProbe(p: ToolchainProbe): Promise<string | null> {
       // 64 KB pipe buffer: it blocks in write() forever and the probe
       // can only ever report "timeout".
       stdio: ["ignore", "ignore", "ignore"],
-      env: buildChildEnv(p.envLang),
+      env: buildChildEnv(),
     });
     const timer = setTimeout(() => {
       if (settled) return;
@@ -199,7 +201,6 @@ const CHECKS: HealthCheck[] = [
       runToolchainProbe({
         bin: binOf(languages.python3.run.argv, "python3.run"),
         args: ["-V"],
-        envLang: "python3",
       }),
   },
   {
@@ -208,7 +209,6 @@ const CHECKS: HealthCheck[] = [
       runToolchainProbe({
         bin: binOf(languages.pypy3.run.argv, "pypy3.run"),
         args: ["--version"],
-        envLang: "pypy3",
       }),
   },
   {
@@ -217,7 +217,6 @@ const CHECKS: HealthCheck[] = [
       runToolchainProbe({
         bin: binOf(languages.cpp17.compile.argv, "cpp17.compile"),
         args: ["--version"],
-        envLang: "cpp17",
       }),
   },
   { name: "sandbox", run: probeSandbox },

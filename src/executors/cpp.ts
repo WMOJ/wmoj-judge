@@ -5,7 +5,15 @@ import languages from "../../languages.json";
 import { buildChildEnv } from "../sandbox/minimalEnv";
 import { runCompile } from "../util/compile";
 
-type CppStandard = "cpp14" | "cpp17" | "cpp20" | "cpp23";
+/**
+ * The four C++ standards this factory serves. Derived from `Language` via
+ * `Extract` so a standard `types.ts` does not know about collapses to
+ * `never` and fails at every call site, instead of reaching
+ * `languages[standard]` as an undefined lookup. This is the check that
+ * `buildChildEnv(standard satisfies Language)` used to carry incidentally,
+ * before `buildChildEnv` stopped taking a language at all.
+ */
+type CppStandard = Extract<Language, "cpp14" | "cpp17" | "cpp20" | "cpp23">;
 
 /**
  * Build a C++ executor bound to a specific standard (c++14, c++17,
@@ -38,7 +46,7 @@ export function createCppExecutor(standard: CppStandard): Executor {
       workDir: string
     ): Promise<{ ok: true } | { ok: false; stderr: string }> {
       const argv = spec.compile.argv;
-      const env = buildChildEnv(standard satisfies Language);
+      const env = buildChildEnv();
       return runCompile(argv, workDir, env);
     },
 

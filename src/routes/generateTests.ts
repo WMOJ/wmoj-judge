@@ -94,7 +94,7 @@ function compileGenerator(
     // timed.
     ["/usr/bin/g++", "-O2", "-std=gnu++17", "-fmax-errors=50", srcPath, "-o", outPath],
     workDir,
-    buildChildEnv("cpp17"),
+    buildChildEnv(),
   );
 }
 
