@@ -131,9 +131,10 @@ function runToolchainProbe(p: ToolchainProbe): Promise<string | null> {
  * `NSJAIL_BIN` and `SECCOMP_POLICY` are the two things every single
  * submission depends on, and neither used to be probed at all — so a
  * judge that graded every case of every submission `RE` still answered
- * `{"status":"ok"}` and Render never restarted it. The three steps
+ * `{"status":"ok"}` and Render never restarted it. The four steps
  * below fail with progressively more specific reasons: missing binary,
- * unreadable policy, then a policy that exists but does not work.
+ * unreadable policy, a policy that exists but does not work, and a
+ * runner that launches but does not report.
  */
 async function probeSandbox(): Promise<string | null> {
   try {
@@ -174,6 +175,14 @@ async function probeSandbox(): Promise<string | null> {
     stdin: "",
   })
     .then((result): string | null => {
+      // The runner's own fault channel comes first. A launch that exits 0
+      // with no resource report is the reporter being dead, and
+      // `sandboxError` is the only field that says so — `exitCode` and
+      // `killedBy` both look healthy, which is how /health answered "ok"
+      // while every /submit case was a 500.
+      if (result.sandboxError !== undefined) {
+        return `sandbox launch failed: ${result.sandboxError}`;
+      }
       if (result.exitCode === 0 && result.killedBy === null) return null;
       const killed =
         result.killedBy === null ? "" : `, killedBy ${result.killedBy}`;

@@ -186,7 +186,9 @@ Guards, all three of which are load-bearing:
 The boot probe is **not** weakened. `probeSandbox` still launches a real jailed `/bin/true` in both
 modes and `sandboxSelfCheck` still demands a non-zero `cpuMs` and a `TO` classification; the only
 difference is that the `fs.access(SECCOMP_POLICY)` readability check is skipped when no policy is
-going to be installed. Never bypass either probe to make something boot.
+going to be installed. `probeSandbox` also fails on a `sandboxError`, so a runner that launches but
+writes no resource report makes `/health` degraded instead of ok. Never bypass either probe to make
+something boot.
 
 Never run this mode anywhere other people can reach, and never as a way to make a submission work.
 If you need genuine production behaviour, run the image on an amd64 Linux host.
