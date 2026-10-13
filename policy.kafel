@@ -1,8 +1,9 @@
 // wmoj-judge unified seccomp policy (Kafel) -- amd64 (Render target)
 //
-// Covers Python 3, PyPy 3, and compiled C++ binaries -- one policy for
-// all six language IDs (python3, pypy3, cpp14/17/20/23). Java was
-// removed from the judge; the JVM notes further down are historical.
+// Covers Python 3, PyPy 3, compiled C++ binaries and the JVM -- one
+// policy for all nine language IDs (python3, pypy3, cpp14/17/20/23,
+// java11/17/21). Java was removed once and restored without moving a
+// single syscall: HotSpot under SerialGC runs on what was already here.
 //
 // Strategy: permissive DEFAULT with explicit denylist.
 //   - DEFAULT is ERRNO(38) (ENOSYS), not KILL -- see the USE line at the
@@ -314,10 +315,13 @@ POLICY wmoj_judge {
     timerfd_settime,
 
     // ---- Shared memory: memfd_create is deliberately absent ----
-    // It was here for one reason -- the JVM's class-data-sharing
-    // archive -- and Java was removed from the judge, so the reason went
-    // with it. python3, pypy3 and a g++ binary do not need it, and it
-    // was the one allowed way to hold RAM the judge cannot see: a memfd
+    // It was here on the belief that the JVM's class-data-sharing
+    // archive needed it. It does not: Java is back (java11/17/21), maps
+    // its CDS archives from ordinary files, and passes every Java golden
+    // with this syscall refused -- measured on an amd64 kernel with the
+    // filter both installed and absent, to identical results. python3,
+    // pypy3 and a g++ binary do not need it either, and it was the one
+    // allowed way to hold RAM the judge cannot see: a memfd
     // is shmem-backed, so its pages are charged to neither --rlimit_as
     // nor maxrss, which means neither RSS-based MLE rule can see them.
     // --rlimit_fsize caps one memfd at 10 MB and --rlimit_nofile allows

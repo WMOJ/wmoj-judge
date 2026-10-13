@@ -37,5 +37,131 @@
     "artifacts": ["a.out"],
     "run": ["./a.out"],
     "probe": ["--version"]
+  },
+  "java11": {
+    "filename": "Main.java",
+    "compile": {
+      "argv": [
+        "/opt/java/11/bin/javac",
+        "-J-XX:+UseSerialGC",
+        "-J-XX:ActiveProcessorCount=1",
+        "-J-XX:TieredStopAtLevel=1",
+        "-J-Xmx192m",
+        "-J-XX:-UsePerfData",
+        "-J-XX:SharedArchiveFile=/opt/java/11/lib/server/javac.jsa",
+        "-encoding",
+        "UTF-8",
+        "-nowarn",
+        "-d",
+        "classes",
+        "Main.java"
+      ]
+    },
+    "artifacts": ["classes"],
+    "run": [
+      "/usr/bin/env",
+      "MALLOC_ARENA_MAX=1",
+      "/opt/java/11/bin/java",
+      "-XX:+UseSerialGC",
+      "-XX:ActiveProcessorCount=1",
+      "-Xmx<HEAP_MB>m",
+      "-Xss64m",
+      "-XX:ReservedCodeCacheSize=64m",
+      "-XX:CompressedClassSpaceSize=32m",
+      "-XX:MaxMetaspaceSize=64m",
+      "-XX:-UsePerfData",
+      "-Dfile.encoding=UTF-8",
+      "-cp",
+      "classes",
+      "Main"
+    ],
+    "probe": ["-x", "/opt/java/11/bin/java", "-a", "-x", "/opt/java/11/bin/javac"],
+    "toolchain": { "name": "java11", "bin": "/usr/bin/test" },
+    "memoryFloorMb": 256,
+    "jvm": { "nonHeapMb": 64, "addressSpaceExtraMb": 1536 }
+  },
+  "java17": {
+    "filename": "Main.java",
+    "compile": {
+      "argv": [
+        "/opt/java/17/bin/javac",
+        "-J-XX:+UseSerialGC",
+        "-J-XX:ActiveProcessorCount=1",
+        "-J-XX:TieredStopAtLevel=1",
+        "-J-Xmx192m",
+        "-J-XX:-UsePerfData",
+        "-J-XX:SharedArchiveFile=/opt/java/17/lib/server/javac.jsa",
+        "-encoding",
+        "UTF-8",
+        "-nowarn",
+        "-d",
+        "classes",
+        "Main.java"
+      ]
+    },
+    "artifacts": ["classes"],
+    "run": [
+      "/usr/bin/env",
+      "MALLOC_ARENA_MAX=1",
+      "/opt/java/17/bin/java",
+      "-XX:+UseSerialGC",
+      "-XX:ActiveProcessorCount=1",
+      "-Xmx<HEAP_MB>m",
+      "-Xss64m",
+      "-XX:ReservedCodeCacheSize=64m",
+      "-XX:CompressedClassSpaceSize=32m",
+      "-XX:MaxMetaspaceSize=64m",
+      "-XX:-UsePerfData",
+      "-Dfile.encoding=UTF-8",
+      "-cp",
+      "classes",
+      "Main"
+    ],
+    "probe": ["-x", "/opt/java/17/bin/java", "-a", "-x", "/opt/java/17/bin/javac"],
+    "toolchain": { "name": "java17", "bin": "/usr/bin/test" },
+    "memoryFloorMb": 256,
+    "jvm": { "nonHeapMb": 64, "addressSpaceExtraMb": 1536 }
+  },
+  "java21": {
+    "filename": "Main.java",
+    "compile": {
+      "argv": [
+        "/opt/java/21/bin/javac",
+        "-J-XX:+UseSerialGC",
+        "-J-XX:ActiveProcessorCount=1",
+        "-J-XX:TieredStopAtLevel=1",
+        "-J-Xmx192m",
+        "-J-XX:-UsePerfData",
+        "-J-XX:SharedArchiveFile=/opt/java/21/lib/server/javac.jsa",
+        "-encoding",
+        "UTF-8",
+        "-nowarn",
+        "-d",
+        "classes",
+        "Main.java"
+      ]
+    },
+    "artifacts": ["classes"],
+    "run": [
+      "/usr/bin/env",
+      "MALLOC_ARENA_MAX=1",
+      "/opt/java/21/bin/java",
+      "-XX:+UseSerialGC",
+      "-XX:ActiveProcessorCount=1",
+      "-Xmx<HEAP_MB>m",
+      "-Xss64m",
+      "-XX:ReservedCodeCacheSize=64m",
+      "-XX:CompressedClassSpaceSize=32m",
+      "-XX:MaxMetaspaceSize=64m",
+      "-XX:-UsePerfData",
+      "-Dfile.encoding=UTF-8",
+      "-cp",
+      "classes",
+      "Main"
+    ],
+    "probe": ["-x", "/opt/java/21/bin/java", "-a", "-x", "/opt/java/21/bin/javac"],
+    "toolchain": { "name": "java21", "bin": "/usr/bin/test" },
+    "memoryFloorMb": 256,
+    "jvm": { "nonHeapMb": 64, "addressSpaceExtraMb": 1536 }
   }
 }

@@ -46,6 +46,8 @@ export const productionJudgeDeps: JudgeDeps = {
 export interface Program {
   readonly argv: readonly string[];
   readonly limits: CaseLimits;
+  /** `RunPlan.addressSpaceMb` — set for a JVM submission only. */
+  readonly addressSpaceMb?: number;
 }
 
 /**
@@ -104,6 +106,11 @@ export async function judgeCase(
     label: `${ws.label}:case${String(c.index)}`,
     timeLimitMs: program.limits.timeLimitMs,
     memLimitMb: program.limits.memLimitMb,
+    // Spread rather than assigned, so the key is absent — not
+    // `undefined` — for every language that does not set it.
+    ...(program.addressSpaceMb === undefined
+      ? {}
+      : { addressSpaceMb: program.addressSpaceMb }),
     stdin,
   });
 

@@ -1,0 +1,48 @@
+{
+  "name": "ac-java-recursion-and-heap",
+  "endpoint": "/submit",
+  "request": {
+    "language": "java17",
+    "code": "// What a real solution leans on and a hello-world does not: recursion a\n// million frames deep (the 64 MB -Xss, which the default 1 MB stack turns\n// into StackOverflowError) and 150 MB of live heap under a 256 MB limit\n// (inside the 192 MB -Xmx, so this must be AC, not MLE).\nimport java.util.Scanner;\n\npublic class Main {\n    static long depth(int n) {\n        return n == 0 ? 0 : 1 + depth(n - 1);\n    }\n\n    public static void main(String[] args) {\n        Scanner in = new Scanner(System.in);\n        int n = in.nextInt();\n        long[][] held = new long[150][];\n        long sum = 0;\n        for (int i = 0; i < held.length; i++) {\n            held[i] = new long[1 << 17];\n            held[i][i] = i;\n            sum += held[i][i];\n        }\n        System.out.println(depth(n) + \" \" + sum);\n    }\n}\n",
+    "input": [
+      "1000000\n"
+    ],
+    "output": [
+      "1000000 11175\n"
+    ],
+    "memoryLimit": 256
+  },
+  "requires": [],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0
+    },
+    "results": [
+      {
+        "index": 0,
+        "exitCode": 0,
+        "passed": true,
+        "expected": "1000000 11175\n",
+        "received": "1000000 11175\n",
+        "stderr": "",
+        "stdout": "1000000 11175\n",
+        "timedOut": false,
+        "verdict": "AC"
+      }
+    ],
+    "effectiveMemoryLimitMb": 256
+  },
+  "patterns": {},
+  "measured": {
+    "results": [
+      {
+        "cpuMs": ">0",
+        "memKb": ">=153600",
+        "timeMs": ">0"
+      }
+    ]
+  }
+}

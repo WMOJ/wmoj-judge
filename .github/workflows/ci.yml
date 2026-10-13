@@ -25,7 +25,7 @@
 # artifact, so every job sees the same bytes.
 #
 # RATE_LIMIT_MAX=1000: the judge allows 60 requests/min per (ip, token)
-# across both gated routes. One replay is 38 requests and one capture 37,
+# across both gated routes. One replay or one capture is 46 requests,
 # so either alone fits, but a retry or a capture-then-replay in the same
 # window trips the limiter and every later transcript fails with a 429.
 name: ci

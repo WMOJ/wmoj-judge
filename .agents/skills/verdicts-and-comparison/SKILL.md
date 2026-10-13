@@ -142,8 +142,9 @@ invisible for the life of the pin. Step 1 decides those runs without needing a n
 
 1. `killClass === "OOM"` — the ladder's step 5 saw peak RSS at the cap;
 2. the run did **not** finish cleanly **and** `run.stderr` matches
-   `/std::bad_alloc|bad_array_new_length|Cannot allocate memory|MemoryError|\bKilled\b/` — the
-   `RLIMIT_AS` case, where the allocation was refused rather than the process killed.
+   `/std::bad_alloc|bad_array_new_length|Cannot allocate memory|MemoryError|OutOfMemoryError|\bKilled\b/`
+   — the `RLIMIT_AS` case, where the allocation was refused rather than the process killed, and for
+   Java the `-Xmx` case, the only way a JVM's limit is enforced (`add-language`).
 
 **There used to be a third rule** — "peak RSS at ≥ 98% of the enforced cap" — sitting between them,
 and it is gone. It was evaluated only on a non-clean run, which is exactly the condition under which

@@ -178,6 +178,9 @@ function classifyKill(run: RunMeasurement, limits: CaseLimits): KillClass {
  *   bad_array_new_length   C++ `new T[n]` with an absurd n
  *   Cannot allocate memory strerror(ENOMEM), printed by many runtimes
  *   MemoryError            CPython / PyPy
+ *   OutOfMemoryError       the JVM -- a full `-Xmx` heap, which is how a
+ *                          Java submission's limit is enforced at all
+ *                          (`src/languages`' `JvmMemory`)
  *   Killed                 an OOM-killer message that reached stderr
  *
  * `\bKilled\b` is the fragile one: a program that legitimately prints the
@@ -186,7 +189,7 @@ function classifyKill(run: RunMeasurement, limits: CaseLimits): KillClass {
  * case -- so do not widen the pattern and do not drop the word boundary.
  */
 const ALLOCATION_FAILURE_RE =
-  /std::bad_alloc|bad_array_new_length|Cannot allocate memory|MemoryError|\bKilled\b/;
+  /std::bad_alloc|bad_array_new_length|Cannot allocate memory|MemoryError|OutOfMemoryError|\bKilled\b/;
 
 /**
  * Decide whether a case blew its memory budget. True when EITHER:

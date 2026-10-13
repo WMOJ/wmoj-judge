@@ -130,9 +130,12 @@ is created — creating one needs privileges this container lacks. Their absence
 blocking rests on seccomp alone and why the pool UID is only a concurrency gate.
 
 **4. No `--chroot`.** Chrooting into the workdir would hide `/usr/bin/python3`, `/usr/bin/g++`, and
-the shared libraries from the child, breaking `execve` on every run. `--rlimit_as` is always
-`memLimitMb`; there is no per-caller override, so it cannot drift from the enforced memory cap and
-silently disable the refused-allocation MLE rule. `SandboxOpts.label` names the call site
+the shared libraries from the child, breaking `execve` on every run. `--rlimit_as` is
+`memLimitMb` for every caller but one: a JVM submission passes `SandboxOpts.addressSpaceMb`
+(`src/languages`' `runPlan`), because HotSpot reserves ~1 GB it never touches and cannot start under
+a cap equal to the limit. `nsjail.ts` takes `max(memLimitMb, addressSpaceMb)`, so the override can
+only raise the cap, and nothing else may pass it — for every other runtime a cap that drifts from
+the enforced limit silently disables the refused-allocation MLE rule. `SandboxOpts.label` names the call site
 (`submit:case3`, `checker:case3`, `generator`, `liveness:launch`, `liveness:measure`,
 `capture:<name>`) so a sandbox log line can be tied back to the work that produced it; the `uid`/`gid`
 fields it replaced were never read.
@@ -141,7 +144,7 @@ The rlimits, all in `--rlimit_*` form:
 
 | rlimit | Value | Why |
 |---|---|---|
-| `as` | the enforced memory cap (MB) | caps **virtual address space**, so `malloc` fails rather than the kernel killing — this is the whole reason MLE needs its own classification |
+| `as` | the enforced memory cap (MB); for a JVM, the cap + 1536 | caps **virtual address space**, so `malloc` fails rather than the kernel killing — this is the whole reason MLE needs its own classification. A JVM's limit is its `-Xmx` heap instead (`add-language`) |
 | `cpu` | `ceil(tl/1000) + 1` s | kernel backstop, timer 2 above |
 | `nproc` | **256** | a **shared per-UID ceiling**, not per-submission headroom — see below |
 | `nofile` | **256** | per process |
@@ -161,7 +164,9 @@ against this same budget until reaped). Per-submission process accounting would 
 this host does not have.
 
 The env allowlist is exactly four `--env` entries: `PATH`, `LANG`, `LC_ALL`, `PYTHONUNBUFFERED`.
-Never add a fifth to make something work.
+Never add a fifth to make something work. The Java run argv starts with
+`/usr/bin/env MALLOC_ARENA_MAX=1` for this reason: the variable is set for the JVM alone, inside the
+jail, from `languages.json`, and the environment every other language sees is unchanged.
 
 ## Process lifetime: settle on `'exit'`, kill the group
 

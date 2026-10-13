@@ -8,7 +8,7 @@ import { config } from "../config";
 import { submitSemaphore } from "../queue/globalSemaphore";
 import { compileCache, cacheKey } from "../cache/compileCache";
 import type { CaseLimits } from "../verdict";
-import { isLanguage, languageSpec } from "../languages";
+import { isLanguage, languageSpec, runPlan } from "../languages";
 import { buildChildEnv } from "../sandbox/minimalEnv";
 import { runCompile } from "../util/compile";
 import { compileChecker } from "../checker";
@@ -206,6 +206,10 @@ submitRouter.post("/", async (req: Request, res: Response) => {
   // a parameter precisely so the clamping stays here, at the route,
   // where `config` belongs.
   const limits: CaseLimits = { timeLimitMs, memLimitMb };
+  // Resolved from the ENFORCED limit, after the clamp: a JVM's heap cap
+  // and its address-space cap both derive from the number the cases are
+  // graded against, never from the one the request asked for.
+  const plan = runPlan(spec, memLimitMb);
   // A checker REPLACES compareMode; which one is in force is decided
   // once, here, rather than re-derived per case.
   const grading: Grading =
@@ -310,7 +314,9 @@ submitRouter.post("/", async (req: Request, res: Response) => {
         const out = await judgeAllCases(
           productionJudgeDeps,
           ws,
-          { argv: spec.runArgv, limits },
+          plan.addressSpaceMb === undefined
+            ? { argv: plan.argv, limits }
+            : { argv: plan.argv, limits, addressSpaceMb: plan.addressSpaceMb },
           grading,
           cases,
           config.PER_SUBMISSION_CONCURRENCY,

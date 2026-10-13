@@ -133,6 +133,15 @@ export interface SandboxOpts {
   label: string;
   timeLimitMs: number;
   memLimitMb: number;
+  /**
+   * The `--rlimit_as` value, in MB, for a runtime that RESERVES far more
+   * address space than it ever touches. Omitted by every caller but a JVM
+   * submission (`src/languages`' `runPlan`), in which case the cap is
+   * `memLimitMb` itself — which is what makes a refused allocation the
+   * MLE signal for everything else. Never below `memLimitMb`:
+   * `nsjail.ts` takes the larger of the two.
+   */
+  addressSpaceMb?: number;
   stdin: string;
   /**
    * Cap, in bytes, on how much of the child's stdout the sandbox
