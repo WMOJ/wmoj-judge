@@ -78,7 +78,7 @@
     "probe": ["-x", "/opt/java/11/bin/java", "-a", "-x", "/opt/java/11/bin/javac"],
     "toolchain": { "name": "java11", "bin": "/usr/bin/test" },
     "memoryFloorMb": 256,
-    "jvm": { "nonHeapMb": 64, "addressSpaceExtraMb": 768 }
+    "jvm": { "nonHeapMb": 64, "addressSpaceExtraMb": 1536 }
   },
   "java17": {
     "filename": "Main.java",
@@ -120,7 +120,7 @@
     "probe": ["-x", "/opt/java/17/bin/java", "-a", "-x", "/opt/java/17/bin/javac"],
     "toolchain": { "name": "java17", "bin": "/usr/bin/test" },
     "memoryFloorMb": 256,
-    "jvm": { "nonHeapMb": 64, "addressSpaceExtraMb": 768 }
+    "jvm": { "nonHeapMb": 64, "addressSpaceExtraMb": 1536 }
   },
   "java21": {
     "filename": "Main.java",
@@ -162,6 +162,6 @@
     "probe": ["-x", "/opt/java/21/bin/java", "-a", "-x", "/opt/java/21/bin/javac"],
     "toolchain": { "name": "java21", "bin": "/usr/bin/test" },
     "memoryFloorMb": 256,
-    "jvm": { "nonHeapMb": 64, "addressSpaceExtraMb": 768 }
+    "jvm": { "nonHeapMb": 64, "addressSpaceExtraMb": 1536 }
   }
 }

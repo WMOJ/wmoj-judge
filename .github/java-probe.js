@@ -71,18 +71,18 @@ for (const v of ["11","17","21"]) {
   console.log("javac hello (no -J flags)", JSON.stringify(compile(spec, dir, HELLO, [spec.compile.argv[0], "-d","classes","Main.java"])));
   compile(spec, dir, HELLO);
   console.log("-- hello, Xmx192, by --rlimit_as");
-  for (const as of [384,448,512,576,640,704,768,896,1024,2048]) console.log(as, JSON.stringify(jail(dir, as, runArgv(spec,192))));
+  for (const as of [896,960,1024,1088,1152,1216,1280,1792]) console.log(as, JSON.stringify(jail(dir, as, runArgv(spec,192))));
   console.log("hello no-seccomp as=1024", JSON.stringify(jail(dir, 1024, runArgv(spec,192), false)));
   console.log("hello Xshare:off as=1024", JSON.stringify(jail(dir, 1024, runArgv(spec,192).map((a)=>a==="-XX:-UsePerfData"?"-Xshare:off":a))));
   console.log("hello no ARENA_MAX as=1024", JSON.stringify(jail(dir, 1024, runArgv(spec,192).slice(2))));
   console.log("hello no ARENA_MAX as=4096", JSON.stringify(jail(dir, 4096, runArgv(spec,192).slice(2))));
   console.log("-- heavy(150MB), Xmx192, by --rlimit_as");
   console.log("javac heavy", JSON.stringify(compile(spec, dir, HEAVY(150))));
-  for (const as of [448,512,576,640,704,768,896,1024,2048]) console.log(as, JSON.stringify(jail(dir, as, runArgv(spec,192))));
+  for (const as of [1024,1088,1152,1216,1280,1344,1408,1472,1536,1664,1792]) console.log(as, JSON.stringify(jail(dir, as, runArgv(spec,192))));
   console.log("-- heavy(280MB), Xmx320, by --rlimit_as");
   compile(spec, dir, HEAVY(280));
-  for (const as of [576,640,704,768,832,896,1024,1152,2048]) console.log(as, JSON.stringify(jail(dir, as, runArgv(spec,320))));
+  for (const as of [1152,1216,1280,1344,1408,1472,1536,1600,1664,1792,1920]) console.log(as, JSON.stringify(jail(dir, as, runArgv(spec,320))));
   console.log("-- heavy(400MB) Xmx192 as=1024 (expect OutOfMemoryError)");
   compile(spec, dir, HEAVY(400));
-  console.log(JSON.stringify(jail(dir, 1024, runArgv(spec,192))));
+  console.log(JSON.stringify(jail(dir, 1792, runArgv(spec,192))));
 }
