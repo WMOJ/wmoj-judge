@@ -1,0 +1,48 @@
+{
+  "name": "re-java-exception",
+  "endpoint": "/submit",
+  "request": {
+    "language": "java21",
+    "code": "// Dies on an uncaught exception: the JVM prints the trace and exits 1.\npublic class Main {\n    public static void main(String[] args) {\n        throw new IllegalStateException(\"boom\");\n    }\n}\n",
+    "input": [
+      "1 2\n"
+    ],
+    "output": [
+      "3\n"
+    ]
+  },
+  "requires": [],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 1,
+      "passed": 0,
+      "failed": 1
+    },
+    "results": [
+      {
+        "index": 0,
+        "exitCode": 1,
+        "passed": false,
+        "expected": "3\n",
+        "received": "",
+        "stdout": "",
+        "timedOut": false,
+        "verdict": "RE"
+      }
+    ],
+    "effectiveMemoryLimitMb": 256
+  },
+  "patterns": {
+    "results[0].stderr": "java\\.lang\\.IllegalStateException: boom"
+  },
+  "measured": {
+    "results": [
+      {
+        "cpuMs": ">0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      }
+    ]
+  }
+}

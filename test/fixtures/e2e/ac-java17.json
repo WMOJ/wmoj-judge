@@ -1,0 +1,83 @@
+{
+  "name": "ac-java17",
+  "endpoint": "/submit",
+  "request": {
+    "language": "java17",
+    "code": "// Reads two integers and prints their sum. Java twin of sum.cpp.\nimport java.io.BufferedReader;\nimport java.io.IOException;\nimport java.io.InputStreamReader;\nimport java.util.StringTokenizer;\n\npublic class Main {\n    public static void main(String[] args) throws IOException {\n        BufferedReader in = new BufferedReader(new InputStreamReader(System.in));\n        StringTokenizer st = new StringTokenizer(in.readLine());\n        long a = Long.parseLong(st.nextToken());\n        long b = Long.parseLong(st.nextToken());\n        System.out.println(a + b);\n    }\n}\n",
+    "input": [
+      "1 2\n",
+      "10 20\n",
+      "-5 5\n"
+    ],
+    "output": [
+      "3\n",
+      "30\n",
+      "0\n"
+    ]
+  },
+  "requires": [],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 3,
+      "passed": 3,
+      "failed": 0
+    },
+    "results": [
+      {
+        "index": 0,
+        "exitCode": 0,
+        "passed": true,
+        "expected": "3\n",
+        "received": "3\n",
+        "stderr": "",
+        "stdout": "3\n",
+        "timedOut": false,
+        "verdict": "AC"
+      },
+      {
+        "index": 1,
+        "exitCode": 0,
+        "passed": true,
+        "expected": "30\n",
+        "received": "30\n",
+        "stderr": "",
+        "stdout": "30\n",
+        "timedOut": false,
+        "verdict": "AC"
+      },
+      {
+        "index": 2,
+        "exitCode": 0,
+        "passed": true,
+        "expected": "0\n",
+        "received": "0\n",
+        "stderr": "",
+        "stdout": "0\n",
+        "timedOut": false,
+        "verdict": "AC"
+      }
+    ],
+    "effectiveMemoryLimitMb": 256
+  },
+  "patterns": {},
+  "measured": {
+    "results": [
+      {
+        "cpuMs": ">0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      },
+      {
+        "cpuMs": ">0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      },
+      {
+        "cpuMs": ">0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      }
+    ]
+  }
+}

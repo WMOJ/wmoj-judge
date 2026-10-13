@@ -1,0 +1,50 @@
+{
+  "name": "mle-java-heap",
+  "endpoint": "/submit",
+  "request": {
+    "language": "java17",
+    "code": "// The Java twin of refuse-allocation.cpp. A JVM's limit is enforced by\n// -Xmx rather than by RLIMIT_AS, so what a Java program sees at the limit\n// is OutOfMemoryError: 600 MB of live arrays against a 256 MB limit.\nimport java.util.ArrayList;\nimport java.util.List;\n\npublic class Main {\n    public static void main(String[] args) {\n        List<long[]> held = new ArrayList<>();\n        for (int i = 0; i < 600; i++) {\n            held.add(new long[1 << 17]);\n        }\n        System.out.println(held.size());\n    }\n}\n",
+    "input": [
+      "1\n"
+    ],
+    "output": [
+      "600\n"
+    ],
+    "timeLimit": 5000,
+    "memoryLimit": 256
+  },
+  "requires": [],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 1,
+      "passed": 0,
+      "failed": 1
+    },
+    "results": [
+      {
+        "index": 0,
+        "exitCode": 1,
+        "passed": false,
+        "expected": "600\n",
+        "received": "",
+        "stdout": "",
+        "timedOut": false,
+        "verdict": "MLE"
+      }
+    ],
+    "effectiveMemoryLimitMb": 256
+  },
+  "patterns": {
+    "results[0].stderr": "java\\.lang\\.OutOfMemoryError: Java heap space"
+  },
+  "measured": {
+    "results": [
+      {
+        "cpuMs": ">0",
+        "memKb": ">0",
+        "timeMs": ">0"
+      }
+    ]
+  }
+}

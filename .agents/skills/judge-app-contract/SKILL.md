@@ -18,7 +18,8 @@ Request:
 
 ```ts
 {
-  language: "python3"|"pypy3"|"cpp14"|"cpp17"|"cpp20"|"cpp23",   // "python"/"cpp" → 400
+  language: "python3"|"pypy3"|"cpp14"|"cpp17"|"cpp20"|"cpp23"|"java11"|"java17"|"java21",
+                             // "python"/"cpp"/"java" → 400. A Java source must declare class Main.
   code: string,
   input: string[],           // equal length
   output: string[],          // equal length

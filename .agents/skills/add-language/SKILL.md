@@ -6,8 +6,9 @@ description: Adds, removes, or changes a language in wmoj-judge — the language
 # Adding or changing a language in wmoj-judge
 
 `languages.json` at the repo root is the source of truth, and `src/languages` derives everything
-else from it. Six IDs exist today: `python3`, `pypy3`, `cpp14`, `cpp17`, `cpp20`, `cpp23`. Java was
-removed; the JVM references still scattered through `policy.kafel` are historical.
+else from it. Nine IDs exist today: `python3`, `pypy3`, `cpp14`, `cpp17`, `cpp20`, `cpp23`, `java11`,
+`java17`, `java21`. Java was removed once and restored; it is the worked example of everything
+below that is not a plain JSON edit — see **Java** at the end.
 
 Adding one is a **JSON edit plus three things no compiler can know about** — the toolchain in the
 `Dockerfile`, the syscalls the runtime needs in `policy.kafel`, and an end-to-end golden captured on
@@ -36,15 +37,16 @@ forgetting it left a perfectly clean build in which every submission in the new 
 | Key | Meaning |
 |---|---|
 | `filename` | what the submission source is written to in the workdir; the compile and run argv name it relatively |
-| `compile` | `{cc, std}`, or **absent** for an interpreted language. `cc` is an absolute binary path; the module assembles the argv (see below) |
+| `compile` | `{cc, std}` for g++ — `cc` is an absolute binary path and the module assembles the argv (see below) — or `{argv}`, a compile line spelled out whole, for any other compiler (javac). **Absent** for an interpreted language |
 | `artifacts` | what the compile step produces and the compile cache stores. Absent/empty for interpreted languages; a compiled language with an empty list **throws at boot** |
-| `run` | how to start the program. `["./a.out"]` for compiled, `[<absolute interpreter>, "-u", <file>]` for interpreted — `-u` matters, unbuffered output prevents stdout deadlocks |
-| `probe` | the version flag the liveness check passes to the binary, e.g. `["-V"]` or `["--version"]`. It must exit 0 |
+| `run` | how to start the program. `["./a.out"]` for compiled, `[<absolute interpreter>, "-u", <file>]` for interpreted — `-u` matters, unbuffered output prevents stdout deadlocks. A JVM entry's is a template carrying `<HEAP_MB>`, resolved only by `runPlan` |
+| `probe` | the arguments the liveness check passes to the binary, e.g. `["-V"]` or `["--version"]`. It must exit 0 |
 | `memoryFloorMb` | optional MINIMUM enforced cap. A floor, not a default: `effectiveMemLimitMb` takes `max(requested, floor)` |
+| `toolchain` | optional `{name, bin}`: probe this binary, under this `/health` name, instead of the compiler or interpreter. Java only — see below |
+| `jvm` | optional `{nonHeapMb, addressSpaceExtraMb}`: the JVM memory plan. Required exactly when `run` carries `<HEAP_MB>`; a mismatch **throws at boot** |
 
-**There is no version field, no time multiplier and no memory adder.** A language gets one memory
-floor and the same time limit as everything else; do not invent extra keys, because nothing reads
-them — and an entry missing a key the schema *does* require (`filename`, `run`, `probe`) is a `tsc`
+**There is no version field and no time multiplier.** A language gets the same time limit as
+everything else; do not invent extra keys, because nothing reads them — and an entry missing a key the schema *does* require (`filename`, `run`, `probe`) is a `tsc`
 error at `src/languages/index.ts`'s `entries` assignment, not a runtime surprise.
 
 `pypy3` sets `memoryFloorMb: 384` because PyPy's baseline RSS is ~60 MB against CPython's ~14 MB. A
@@ -63,6 +65,7 @@ Everything in this list follows from the entry. None of it is a place to edit.
 | the compile line | `cppCompileArgv(cc, std, filename, artifacts[0])` | `[cc, "-O2", "-std=<std>", "-fmax-errors=50", <src>, "-o", <out>]` |
 | the checker and generator compile | `setterCompileArgv`, the `cpp17` entry's `cc`/`std` | problem-setter code gets the submission dialect — ADR 0003 |
 | the memory floor | `LanguageSpec.memoryFloorMb` | read once, at the route, into `effectiveMemoryLimitMb` |
+| the run plan | `runPlan(spec, memLimitMb)` | the argv as written and no address-space override — except for a JVM, where it resolves `<HEAP_MB>` and raises `--rlimit_as` |
 | the liveness probes | `toolchainProbes()` | one probe per **distinct binary** (four C++ entries share one `g++`), named by basename, run at boot and on `/health`'s fast cadence |
 
 A compiled language's probe is its **compiler**, not its run argv: `./a.out` does not exist until
@@ -111,8 +114,49 @@ from `/submit`'s: `wmoj-app`'s `judge.sh` sends bare `"cpp"` there and nowhere e
 every generator is built with `setterCompileArgv` — so **a new language is not automatically usable
 for generators.**
 
+## Java
+
+Three entries, `java11`/`java17`/`java21`, one trimmed runtime each under `/opt/java/<n>`. Everything
+about them that differs from the other six is here, with the measurement that settled it.
+
+- **The class must be `Main`.** The source is always written to `Main.java` and run as `Main`; javac
+  itself rejects a public class of any other name. `wmoj-app` tells the student on the submit page.
+- **The runtimes are `jlink`ed, not installed** (`Dockerfile`, stage 3): `java.base`, `java.desktop`
+  (for `java.awt.Point`/`geom`) and `jdk.compiler`, ~65 MB of `lib/modules` instead of a JDK's ~130.
+  A submission importing anything outside those three modules gets a compile error. Each runtime is
+  linked at its final path because its two CDS archives record it: `classes.jsa` (every run) and
+  `javac.jsa` (cuts a hello-world compile from ~380 ms to ~210 ms of CPU on the CI runner).
+- **Memory is `-Xmx`, not `RLIMIT_AS`.** Heap = enforced limit − `nonHeapMb` (64), so the limit still
+  means roughly the whole process; a full heap is `OutOfMemoryError`, which `ALLOCATION_FAILURE_RE`
+  grades `MLE`. `--rlimit_as` is the limit + `addressSpaceExtraMb` (1536). That number is measured,
+  not guessed: under the real jail on amd64 the worst case (Java 17, four user threads, deep
+  recursion) first starts at limit + 1088, and **too little address space also surfaces as
+  `OutOfMemoryError: unable to create native thread` — an `MLE` on a correct program** — so shrink it
+  only with a fresh measurement. The floor is 256 so the heap is never below 192 MB.
+- **`-Xss64m` is why the address-space number is so large**, and why it is worth it: the default
+  1 MB stack turns an ordinary 10^5-deep DFS into `StackOverflowError`. HotSpot applies it to its own
+  Java threads too (Reference Handler, Finalizer, Signal Dispatcher, …), 64 MB of reservation each,
+  before `main()` runs — and to every thread a submission starts.
+- **`/usr/bin/env MALLOC_ARENA_MAX=1`** leads the run argv because glibc otherwise reserves a 64 MB
+  arena per thread: without it a hello-world that starts under 1 GB of address space no longer does
+  (measured: it fails at 1024 MB and starts at 4096).
+- **`-XX:+UseSerialGC -XX:ActiveProcessorCount=1`** on both `java` and `javac`: the container reports
+  the HOST's cores and RAM, and an unpinned JVM sizes its GC threads and its heap from them.
+- **The probe does not boot a JVM** (`toolchain`): `/usr/bin/test -x` on both launchers. Three
+  `java -version` every 30 s against a 2 s timeout on a ~0.1-CPU host is a health check that flaps.
+  The Java goldens are what prove the JVM runs, and CI replays them on every push.
+- **No syscall moved.** `policy.kafel` already allowed everything HotSpot needs under SerialGC, and
+  `memfd_create` stays refused.
+- **What it weakens, deliberately.** A Java program's NATIVE memory (`Unsafe`, direct buffers, thread
+  stacks it actually touches) is bounded only by the raised address-space cap, not by the limit, so
+  one can push the container past 512 MB and take the judge down with it. That is the same blast
+  radius as `sandbox-changes`' known weaknesses, not a new one, but it is real.
+
 ## Never
 
+- Never run a JVM spec's `runArgv` directly — it carries `<HEAP_MB>`. Go through `runPlan`.
+- Never pass `addressSpaceMb` for a non-JVM language: for everything else `--rlimit_as` equal to the
+  enforced limit is what makes a refused allocation mean `MLE`.
 - Never install a runtime in the Dockerfile's builder stage instead of the runtime stage.
 - Never add fields to `languages.json` that nothing reads (versions, multipliers, adders).
 - Never re-introduce a hand-kept list of language codes anywhere; membership in the JSON is the set.

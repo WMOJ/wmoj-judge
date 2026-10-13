@@ -118,7 +118,7 @@ uts, cgroup), chroot, `--user`/`--group`, cgroups.
   submission shares UID 1000 and one `/tmp` root, so **cross-submission isolation does not hold**.
   `prlimit64` and `sched_setaffinity` are filtered to `pid == 0` so a submission cannot retarget the
   judge; `kill`/`tgkill` deliberately are not (CPython's `abort()` needs a non-zero pid).
-- **Compilation is NOT sandboxed** — `g++` is spawned directly (`util/compile.ts`) with no timeout
+- **Compilation is NOT sandboxed** — `g++`/`javac` are spawned directly (`util/compile.ts`), no timeout
   and no rlimits for submissions, checkers and generators alike. A compile bomb can OOM the
   service, and `#include` of an arbitrary path leaks its contents through `compileError`. Only the
   *run* step goes through nsjail.
@@ -146,9 +146,9 @@ WA/AC order and the kill ladder are internals guarded by `test/unit/verdict.test
 
 ## Languages
 
-`languages.json` is the source of truth and `src/languages` derives everything from it (`Language`
-is its `keyof`): `python3`, `pypy3` (384 MB floor), `cpp14/17/20/23`. Adding one → **`add-language`**.
-`/submit` takes only canonical codes; `/generate-tests` still takes bare `cpp` for `judge.sh`.
+`languages.json` is the source of truth; `src/languages` derives the rest: `python3`, `pypy3` (384 MB
+floor), `cpp14/17/20/23`, `java11/17/21` (class `Main`; 256 floor; heap `-Xmx` = limit − 64, and the
+one `--rlimit_as` above the limit). → **`add-language`**. `/generate-tests` alone takes bare `cpp`.
 
 ## Concurrency & config
 

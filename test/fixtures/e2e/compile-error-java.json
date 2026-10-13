@@ -1,0 +1,31 @@
+{
+  "name": "compile-error-java",
+  "endpoint": "/submit",
+  "request": {
+    "language": "java17",
+    "code": "// Does not compile: javac's diagnostic is what a Java student's CE shows.\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1\n        System.out.println(x);\n    }\n}\n",
+    "input": [
+      "1 2\n"
+    ],
+    "output": [
+      "3\n"
+    ]
+  },
+  "requires": [],
+  "status": 200,
+  "response": {
+    "summary": {
+      "total": 0,
+      "passed": 0,
+      "failed": 0
+    },
+    "results": [],
+    "effectiveMemoryLimitMb": 256
+  },
+  "patterns": {
+    "compileError": "^Main\\.java:\\d+: error: ';' expected"
+  },
+  "measured": {
+    "results": []
+  }
+}

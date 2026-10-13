@@ -25,7 +25,7 @@
 # artifact, so every job sees the same bytes.
 #
 # RATE_LIMIT_MAX=1000: the judge allows 60 requests/min per (ip, token)
-# across both gated routes. One replay is 38 requests and one capture 37,
+# across both gated routes. One replay or one capture is 46 requests,
 # so either alone fits, but a retry or a capture-then-replay in the same
 # window trips the limiter and every later transcript fails with a 429.
 name: ci
@@ -106,22 +106,6 @@ jobs:
       - run: JUDGE_URL=http://localhost:4001 JUDGE_SHARED_SECRET=ci npm run test:e2e
       - if: failure()
         run: docker logs judge
-
-  # TEMPORARY, removed before merge: measure the JVMs under the real jail.
-  java-probe:
-    if: github.event_name == 'pull_request'
-    needs: image
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: image
-      - run: docker load < image.tgz
-      - run: docker image ls wmoj-judge:ci
-      - run: |
-          docker run --rm -v "$PWD/.github/java-probe.js:/probe.js:ro" \
-            --entrypoint node wmoj-judge:ci /probe.js
 
   # A fresh capture of the goldens, uploaded as an artifact for a human to
   # review against Appendix A of the plan and commit. It runs on
