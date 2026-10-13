@@ -48,6 +48,8 @@ export interface Program {
   readonly limits: CaseLimits;
   /** `RunPlan.addressSpaceMb` — set for a JVM submission only. */
   readonly addressSpaceMb?: number;
+  /** `RunPlan.inheritTaskLimit` — set for a JVM submission only. */
+  readonly inheritTaskLimit?: boolean;
 }
 
 /**
@@ -111,6 +113,7 @@ export async function judgeCase(
     ...(program.addressSpaceMb === undefined
       ? {}
       : { addressSpaceMb: program.addressSpaceMb }),
+    ...(program.inheritTaskLimit === true ? { inheritTaskLimit: true } : {}),
     stdin,
   });
 

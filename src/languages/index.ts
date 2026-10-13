@@ -264,6 +264,12 @@ export interface RunPlan {
    * for every language but the JVM ones.
    */
   readonly addressSpaceMb: number | undefined;
+  /**
+   * Whether the run must escape the jail's `--rlimit_nproc 256`
+   * (`SandboxOpts.inheritTaskLimit`). True for a JVM, which is the one
+   * runtime here that cannot start without creating threads.
+   */
+  readonly inheritTaskLimit: boolean;
 }
 
 /**
@@ -277,12 +283,13 @@ export interface RunPlan {
 export function runPlan(spec: LanguageSpec, memLimitMb: number): RunPlan {
   const jvm = spec.jvm;
   if (jvm === undefined) {
-    return { argv: spec.runArgv, addressSpaceMb: undefined };
+    return { argv: spec.runArgv, addressSpaceMb: undefined, inheritTaskLimit: false };
   }
   const heapMb = Math.max(MIN_JVM_HEAP_MB, Math.floor(memLimitMb - jvm.nonHeapMb));
   return {
     argv: spec.runArgv.map((arg) => arg.replace(HEAP_PLACEHOLDER, String(heapMb))),
     addressSpaceMb: Math.floor(memLimitMb + jvm.addressSpaceExtraMb),
+    inheritTaskLimit: true,
   };
 }
 

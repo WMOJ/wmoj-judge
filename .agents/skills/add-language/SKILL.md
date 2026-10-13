@@ -145,9 +145,17 @@ about them that differs from the other six is here, with the measurement that se
 - **The probe does not boot a JVM** (`toolchain`): `/usr/bin/test -x` on both launchers. Three
   `java -version` every 30 s against a 2 s timeout on a ~0.1-CPU host is a health check that flaps.
   The Java goldens are what prove the JVM runs, and CI replays them on every push.
+- **A Java run drops the jail's `--rlimit_nproc 256`** (`inheritTaskLimit` → `--rlimit_nproc soft`).
+  On Render that count spans the whole host's UID 1000, other tenants included, and is always past
+  256, so every jailed `clone` fails EAGAIN — measured in production with a C++ `pthread_create`.
+  Single-threaded runtimes never notice; a JVM dies with `Cannot create VM thread`. **CI cannot see
+  this**: its runner has UID 1000 to itself, so Java was green on CI and `RE` on every case in
+  production. After any change to how Java is launched, submit a Java program to the DEPLOYED judge.
 - **No syscall moved.** `policy.kafel` already allowed everything HotSpot needs under SerialGC, and
   `memfd_create` stays refused.
-- **What it weakens, deliberately.** A Java program's NATIVE memory (`Unsafe`, direct buffers, thread
+- **What it weakens, deliberately.** A Java program can start threads and processes where no other
+  language's submission can in production, bounded by the container's pids cgroup, the CPU and wall
+  limits and the group kill, not per UID. And a Java program's NATIVE memory (`Unsafe`, direct buffers, thread
   stacks it actually touches) is bounded only by the raised address-space cap, not by the limit, so
   one can push the container past 512 MB and take the judge down with it. That is the same blast
   radius as `sandbox-changes`' known weaknesses, not a new one, but it is real.

@@ -146,7 +146,7 @@ The rlimits, all in `--rlimit_*` form:
 |---|---|---|
 | `as` | the enforced memory cap (MB); for a JVM, the cap + 1536 | caps **virtual address space**, so `malloc` fails rather than the kernel killing — this is the whole reason MLE needs its own classification. A JVM's limit is its `-Xmx` heap instead (`add-language`) |
 | `cpu` | `ceil(tl/1000) + 1` s | kernel backstop, timer 2 above |
-| `nproc` | **256** | a **shared per-UID ceiling**, not per-submission headroom — see below |
+| `nproc` | **256**; `soft` (the judge's own limit) for a JVM | a **shared per-UID ceiling**, not per-submission headroom — see below |
 | `nofile` | **256** | per process |
 | `fsize` | **10** (MB) | a submission cannot fill the 512 MB host's disk. Regular files only (`S_ISREG`): it does **not** bound pipe writes |
 | `core` | **0** | no core dumps into a shared `/tmp` |
@@ -162,6 +162,12 @@ submission gets `EAGAIN` first, and 256 already has to cover PyPy's and glibc's 
 (transient descendants) plus **tini** reaping orphans (permanent zombies, which the kernel counts
 against this same budget until reaped). Per-submission process accounting would need cgroups, which
 this host does not have.
+
+**On Render the 256 is exceeded before anything runs.** The count spans the host's whole user
+namespace, other tenants' UID-1000 tasks included, so in production every jailed `clone` fails
+`EAGAIN` and no submission can fork or start a thread at all — the accidental reason a fork bomb is
+impossible there, and invisible on CI, whose runner has UID 1000 to itself. A JVM cannot start
+without threads, so a Java run alone passes `inheritTaskLimit` and gets `--rlimit_nproc soft`.
 
 The env allowlist is exactly four `--env` entries: `PATH`, `LANG`, `LC_ALL`, `PYTHONUNBUFFERED`.
 Never add a fifth to make something work. The Java run argv starts with

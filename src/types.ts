@@ -142,6 +142,20 @@ export interface SandboxOpts {
    * `nsjail.ts` takes the larger of the two.
    */
   addressSpaceMb?: number;
+  /**
+   * Run without the jail's own `--rlimit_nproc 256`, under whatever task
+   * limit the judge process itself has. Set for a JVM submission only.
+   *
+   * `RLIMIT_NPROC` counts every task of the REAL UID in the kernel's
+   * user namespace, and on Render that namespace is the whole host:
+   * other tenants' UID-1000 tasks are in the count, it is permanently
+   * above 256, and so `clone` fails with EAGAIN for every jailed program
+   * — measured in production, where a C++ `pthread_create` and a `fork`
+   * both return 11 with 15 tasks in the container's own pids cgroup.
+   * Single-threaded runtimes never notice. A JVM cannot start: it dies
+   * with "Cannot create VM thread" before `main()`.
+   */
+  inheritTaskLimit?: boolean;
   stdin: string;
   /**
    * Cap, in bytes, on how much of the child's stdout the sandbox

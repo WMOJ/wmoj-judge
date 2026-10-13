@@ -639,7 +639,18 @@ export async function runSandboxed(opts: SandboxOpts): Promise<RunOutcome> {
     // the number would isolate nothing -- it would only decide which
     // submission gets EAGAIN first -- and 256 already has to cover
     // PyPy's and glibc's threads across up to 16 concurrent runs.
-    "--rlimit_nproc", "256",
+    //
+    // ON RENDER THE 256 IS ALREADY EXCEEDED BEFORE ANYTHING RUNS. The
+    // count spans the host's whole user namespace, other tenants'
+    // UID-1000 tasks included, so there every `clone` from a jailed
+    // program fails EAGAIN: no submission can fork or start a thread at
+    // all. That is the accidental reason a fork bomb is impossible in
+    // production, and it is why a JVM -- which cannot start without
+    // threads -- asks for `inheritTaskLimit`: "soft" is nsjail's word for
+    // "leave the limit the judge itself runs under". A Java submission is
+    // then bounded by the container's pids cgroup, its CPU and wall
+    // limits and the group kill below, and by nothing per-UID.
+    "--rlimit_nproc", opts.inheritTaskLimit === true ? "soft" : "256",
     "--rlimit_nofile", "256",
     "--rlimit_fsize", "10",
     "--rlimit_core", "0",

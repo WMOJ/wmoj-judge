@@ -231,6 +231,9 @@ test("a JVM run plan caps the heap below the limit and raises the address space 
       plan.addressSpaceMb !== undefined && plan.addressSpaceMb > 256,
       `${id}: HotSpot cannot start under an address-space cap equal to the limit`,
     );
+    // Render's host-wide UID-1000 task count is already past the jail's
+    // 256, so a JVM under it dies with "Cannot create VM thread".
+    assert.equal(plan.inheritTaskLimit, true, `${id} cannot start without threads`);
     // Both numbers track the ENFORCED limit.
     assert.ok(runPlan(spec, 384).argv.includes("-Xmx320m"));
     assert.equal(
@@ -251,6 +254,7 @@ test("every other language runs its argv as written, under the limit itself", ()
     const spec = languageSpec(id);
     const plan = runPlan(spec, 256);
     assert.deepEqual([...plan.argv], [...spec.runArgv]);
+    assert.equal(plan.inheritTaskLimit, false, `${id} keeps the jail's own task limit`);
     assert.equal(
       plan.addressSpaceMb,
       undefined,

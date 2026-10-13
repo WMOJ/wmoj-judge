@@ -316,7 +316,12 @@ submitRouter.post("/", async (req: Request, res: Response) => {
           ws,
           plan.addressSpaceMb === undefined
             ? { argv: plan.argv, limits }
-            : { argv: plan.argv, limits, addressSpaceMb: plan.addressSpaceMb },
+            : {
+                argv: plan.argv,
+                limits,
+                addressSpaceMb: plan.addressSpaceMb,
+                inheritTaskLimit: plan.inheritTaskLimit,
+              },
           grading,
           cases,
           config.PER_SUBMISSION_CONCURRENCY,
