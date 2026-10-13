@@ -565,6 +565,15 @@ export async function runSandboxed(opts: SandboxOpts): Promise<RunOutcome> {
   const cpuSec = cpuLimitSecFor(timeLimitMs);
   // --rlimit_fsize is in MB per nsjail's docs; --rlimit_as is in MB.
   const memLimitMb = Math.max(1, Math.floor(opts.memLimitMb));
+  // The address-space cap IS the memory limit, except for a JVM, which
+  // cannot start under one that small (`src/languages`' `JvmMemory`).
+  // `max`, so an override can only ever raise it: a caller cannot use
+  // this to run a program under a cap tighter than the one it is graded
+  // against, which would turn an honest AC into a refused allocation.
+  const addressSpaceMb =
+    opts.addressSpaceMb === undefined || !Number.isFinite(opts.addressSpaceMb)
+      ? memLimitMb
+      : Math.max(memLimitMb, Math.floor(opts.addressSpaceMb));
   const maxStdoutBytes = capOf(opts.maxStdoutBytes, DEFAULT_MAX_STDOUT_BYTES);
   const maxStderrBytes = capOf(opts.maxStderrBytes, DEFAULT_MAX_STDERR_BYTES);
 
@@ -616,7 +625,7 @@ export async function runSandboxed(opts: SandboxOpts): Promise<RunOutcome> {
     // no-new-privs, with the full seccomp allow-list and rlimits.
     "--keep_caps",
     "--cwd", opts.cwd,
-    "--rlimit_as", argvInt(memLimitMb),
+    "--rlimit_as", argvInt(addressSpaceMb),
     "--rlimit_cpu", argvInt(cpuSec),
     // RLIMIT_NPROC is checked against the total task count for the REAL
     // UID, and --user/--group are deliberately absent, so this is one

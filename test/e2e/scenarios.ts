@@ -181,6 +181,113 @@ export const SCENARIOS: readonly Scenario[] = [
     requires: [],
     intended: "3x AC",
   },
+  // One AC per Java version: each has its own javac, its own runtime
+  // image and its own CDS archives, so one passing proves nothing about
+  // the other two. An AC also pins an EMPTY stderr — a JVM that starts
+  // but warns (a flag it does not know, an archive it could not map)
+  // shows up here as a diff rather than as noise in every student's run.
+  {
+    name: "ac-java11",
+    endpoint: "/submit",
+    request: {
+      language: "java11",
+      code: program("Sum.java"),
+      input: SUM_INPUT,
+      output: SUM_OUTPUT,
+    },
+    requires: [],
+    intended: "3x AC",
+    measured: { cpuMs: ">0" },
+  },
+  {
+    name: "ac-java17",
+    endpoint: "/submit",
+    request: {
+      language: "java17",
+      code: program("Sum.java"),
+      input: SUM_INPUT,
+      output: SUM_OUTPUT,
+    },
+    requires: [],
+    intended: "3x AC",
+    measured: { cpuMs: ">0" },
+  },
+  {
+    name: "ac-java21",
+    endpoint: "/submit",
+    request: {
+      language: "java21",
+      code: program("Sum.java"),
+      input: SUM_INPUT,
+      output: SUM_OUTPUT,
+    },
+    requires: [],
+    intended: "3x AC",
+    measured: { cpuMs: ">0" },
+  },
+  {
+    name: "ac-java-recursion-and-heap",
+    endpoint: "/submit",
+    request: {
+      language: "java17",
+      code: program("DeepRecursionAndHeap.java"),
+      input: ["1000000\n"],
+      output: ["1000000 11175\n"],
+      memoryLimit: 256,
+    },
+    requires: [],
+    intended:
+      "AC — a million frames fit the 64 MB stack and 150 MB of live heap fits " +
+      "under a 256 MB limit; StackOverflowError (RE) or OutOfMemoryError (MLE) " +
+      "here means the JVM's memory plan regressed",
+    measured: { cpuMs: ">0", memKb: ">=153600" },
+  },
+  {
+    name: "mle-java-heap",
+    endpoint: "/submit",
+    request: {
+      language: "java17",
+      code: program("HeapExhaustion.java"),
+      input: ["1\n"],
+      output: ["600\n"],
+      timeLimit: 5000,
+      memoryLimit: 256,
+    },
+    // Not `rlimit_as`: the heap cap is `-Xmx`, which the JVM enforces
+    // itself, so this fires under emulation too.
+    requires: [],
+    intended: "MLE — OutOfMemoryError is the JVM's allocation signature (-Xmx, not RLIMIT_AS)",
+    patterns: { "results[0].stderr": "java\\.lang\\.OutOfMemoryError: Java heap space" },
+    measured: { cpuMs: ">0" },
+  },
+  {
+    name: "re-java-exception",
+    endpoint: "/submit",
+    request: {
+      language: "java21",
+      code: program("UncaughtException.java"),
+      input: ["1 2\n"],
+      output: ["3\n"],
+    },
+    requires: [],
+    intended: "RE, exit 1, with the stack trace on stderr",
+    patterns: { "results[0].stderr": "java\\.lang\\.IllegalStateException: boom" },
+    measured: { cpuMs: ">0" },
+  },
+  {
+    name: "compile-error-java",
+    endpoint: "/submit",
+    request: {
+      language: "java17",
+      code: program("MissingSemicolon.java"),
+      input: ["1 2\n"],
+      output: ["3\n"],
+    },
+    requires: [],
+    intended: "HTTP 200 with summary 0/0/0, no results, and javac's diagnostic as compileError",
+    // Relative, like g++'s: javac runs with the workdir as cwd.
+    patterns: { compileError: "^Main\\.java:\\d+: error: ';' expected" },
+  },
   {
     name: "ac-python3",
     endpoint: "/submit",
@@ -569,7 +676,7 @@ export const SCENARIOS: readonly Scenario[] = [
       output: ["3\n"],
     },
     requires: [],
-    intended: "400 — Java was removed",
+    intended: "400 — Java is three versioned codes; a bare `java` names none of them",
   },
   {
     name: "legacy-alias-python-400",

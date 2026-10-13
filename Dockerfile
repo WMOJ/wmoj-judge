@@ -7,9 +7,11 @@
 #                       Debian apt repos), and build the wmoj-jailrun
 #                       resource reporter that wraps it.
 #   2. builder        : install dev deps and compile TypeScript -> dist.
-#   3. runtime        : install toolchain + runtime deps, copy dist,
-#                       create the unprivileged UID pool, lock down
-#                       /app perms.
+#   3. jdk11/17/21    : jlink one trimmed Java runtime per supported
+#                       version out of the Eclipse Temurin JDK images.
+#   4. runtime        : install toolchain + runtime deps, copy dist and
+#                       the three Java runtimes, create the unprivileged
+#                       UID pool, lock down /app perms.
 #
 # Base image: node:20-trixie-slim (Debian 13). Trixie ships g++ 14.2,
 # which has complete -std=c++23 support — required for the cpp23
@@ -209,14 +211,106 @@ COPY languages.json policy.kafel ./
 RUN npm run build
 
 # ---------------------------------------------------------------------
-# Stage 3: runtime image
+# Stage 3: one trimmed Java runtime per supported version
+# ---------------------------------------------------------------------
+# Debian trixie packages only its default JDK, so the three versions come
+# from the Eclipse Temurin images instead -- and not as whole JDKs, which
+# are ~300 MB apiece. `jlink` builds a runtime holding just the modules a
+# competitive-programming submission can reach:
+#
+#   java.base     java.util / java.io / java.math / java.nio -- nearly
+#                 every submission needs nothing else
+#   java.desktop  java.awt.Point and java.awt.geom, which geometry
+#                 solutions do import
+#   jdk.compiler  javac
+#
+# The size matters twice. On disk, and in ADDRESS SPACE: HotSpot mmap()s
+# the whole `lib/modules` image at startup, and the jail caps address
+# space (--rlimit_as), so a full JDK's ~130 MB image is 130 MB of every
+# Java run's budget spent before main() runs.
+#
+# Each runtime is linked AT ITS FINAL PATH (/opt/java/<n>) and copied to
+# the same path in the runtime stage, because the two class-data-sharing
+# archives generated below record where the runtime lives:
+#
+#   lib/server/classes.jsa  the default CDS archive. jlink does not ship
+#                           one, and without it every single test case
+#                           pays to parse and verify the core classes --
+#                           on a ~0.1-CPU host that is most of a second
+#                           per case.
+#   lib/server/javac.jsa    the same idea for the compiler, whose classes
+#                           the default archive does not cover: javac
+#                           spends most of a small compile loading itself.
+#
+# Both are loaded with the default -Xshare:auto, so an archive the JVM
+# cannot map is skipped silently, never a failed run. The javac archive
+# is best-effort for the same reason: if it cannot be generated the
+# compile is merely slower, so its failure does not fail the build.
+FROM --platform=linux/amd64 eclipse-temurin:11-jdk AS jdk11
+COPY <<'WARMUP_JAVA' /tmp/warm/Main.java
+import java.util.*;
+import java.io.*;
+public class Main {
+    public static void main(String[] args) throws IOException {
+        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
+        StringTokenizer st = new StringTokenizer("1 2");
+        List<Integer> xs = new ArrayList<>();
+        while (st.hasMoreTokens()) xs.add(Integer.parseInt(st.nextToken()));
+        Map<Integer, Long> m = new HashMap<>();
+        for (int x : xs) m.merge(x, 1L, Long::sum);
+        PrintWriter out = new PrintWriter(new BufferedWriter(new OutputStreamWriter(System.out)));
+        out.println(m.size());
+        out.flush();
+    }
+}
+WARMUP_JAVA
+RUN jlink --add-modules java.base,java.desktop,jdk.compiler \
+        --no-header-files --no-man-pages --output /opt/java/11 \
+    && /opt/java/11/bin/java -XX:+UseSerialGC -Xshare:dump \
+    && cd /tmp/warm \
+    && ( /opt/java/11/bin/javac -J-XX:+UseSerialGC -J-XX:DumpLoadedClassList=/tmp/warm/javac.classlist -d out Main.java \
+         && /opt/java/11/bin/java -XX:+UseSerialGC -Xshare:dump \
+              -XX:SharedClassListFile=/tmp/warm/javac.classlist \
+              -XX:SharedArchiveFile=/opt/java/11/lib/server/javac.jsa \
+         || echo "WARNING: javac CDS archive not generated for Java 11" ) \
+    && /opt/java/11/bin/java -version && /opt/java/11/bin/javac -version
+
+FROM --platform=linux/amd64 eclipse-temurin:17-jdk AS jdk17
+COPY --from=jdk11 /tmp/warm/Main.java /tmp/warm/Main.java
+RUN jlink --add-modules java.base,java.desktop,jdk.compiler \
+        --no-header-files --no-man-pages --output /opt/java/17 \
+    && /opt/java/17/bin/java -XX:+UseSerialGC -Xshare:dump \
+    && cd /tmp/warm \
+    && ( /opt/java/17/bin/javac -J-XX:+UseSerialGC -J-XX:DumpLoadedClassList=/tmp/warm/javac.classlist -d out Main.java \
+         && /opt/java/17/bin/java -XX:+UseSerialGC -Xshare:dump \
+              -XX:SharedClassListFile=/tmp/warm/javac.classlist \
+              -XX:SharedArchiveFile=/opt/java/17/lib/server/javac.jsa \
+         || echo "WARNING: javac CDS archive not generated for Java 17" ) \
+    && /opt/java/17/bin/java -version && /opt/java/17/bin/javac -version
+
+FROM --platform=linux/amd64 eclipse-temurin:21-jdk AS jdk21
+COPY --from=jdk11 /tmp/warm/Main.java /tmp/warm/Main.java
+RUN jlink --add-modules java.base,java.desktop,jdk.compiler \
+        --no-header-files --no-man-pages --output /opt/java/21 \
+    && /opt/java/21/bin/java -XX:+UseSerialGC -Xshare:dump \
+    && cd /tmp/warm \
+    && ( /opt/java/21/bin/javac -J-XX:+UseSerialGC -J-XX:DumpLoadedClassList=/tmp/warm/javac.classlist -d out Main.java \
+         && /opt/java/21/bin/java -XX:+UseSerialGC -Xshare:dump \
+              -XX:SharedClassListFile=/tmp/warm/javac.classlist \
+              -XX:SharedArchiveFile=/opt/java/21/lib/server/javac.jsa \
+         || echo "WARNING: javac CDS archive not generated for Java 21" ) \
+    && /opt/java/21/bin/java -version && /opt/java/21/bin/javac -version
+
+# ---------------------------------------------------------------------
+# Stage 4: runtime image
 # ---------------------------------------------------------------------
 FROM --platform=linux/amd64 node:20-trixie-slim AS runtime
 
-# Compilers and language runtimes for the 6-entry language matrix:
+# Compilers and language runtimes for the 9-entry language matrix:
 #   python3      -> /usr/bin/python3                (debian apt)
 #   pypy3        -> /usr/bin/pypy3                  (debian apt)
 #   cpp14/17/20/23 -> /usr/bin/g++                  (debian apt, gcc 14)
+#   java11/17/21 -> /opt/java/<n>/bin/{javac,java}  (jlink, stage 3)
 #
 # Shared libs for nsjail at runtime: libprotobuf32t64 (trixie renamed
 # from libprotobuf32 during the 64-bit time_t transition), libnl-3-200,
@@ -242,6 +336,13 @@ RUN apt-get update \
 COPY --from=nsjail-builder /src/nsjail/nsjail /usr/local/bin/nsjail
 COPY --from=nsjail-builder /usr/local/bin/wmoj-jailrun /usr/local/bin/wmoj-jailrun
 RUN chmod 0755 /usr/local/bin/nsjail /usr/local/bin/wmoj-jailrun
+
+# The Java runtimes from stage 3, at the path they were linked at (their
+# CDS archives depend on it). Root-owned and read-only to UID 1000, like
+# every other toolchain here.
+COPY --from=jdk11 /opt/java/11 /opt/java/11
+COPY --from=jdk17 /opt/java/17 /opt/java/17
+COPY --from=jdk21 /opt/java/21 /opt/java/21
 
 # Unprivileged UID pool — matches src/sandbox/uidPool.ts (BASE_UID=1000,
 # pool size 16). Use --system so the accounts aren't interactive and

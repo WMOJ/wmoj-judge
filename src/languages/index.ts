@@ -33,16 +33,74 @@ export type Language = keyof typeof table;
  * or spells `filename` wrong, fails `tsc` at this line rather than
  * surfacing as an `undefined` argv at the first submission. Optional
  * here means optional in the schema — `compile`/`artifacts` for
- * interpreted languages, `memoryFloorMb` for everything except pypy3.
+ * interpreted languages, `memoryFloorMb` for the runtimes with a large
+ * baseline, `toolchain` and `jvm` for Java alone.
  */
 interface LanguageEntry {
   readonly filename: string;
   readonly run: readonly string[];
   readonly probe: readonly string[];
-  readonly compile?: { readonly cc: string; readonly std: string };
+  /**
+   * `{cc, std}` is a g++ line this module assembles (`cppCompileArgv`).
+   * `{argv}` is a compile line spelled out whole, for a compiler that is
+   * not g++ — javac, whose flags share nothing with it.
+   */
+  readonly compile?:
+    | { readonly cc: string; readonly std: string }
+    | { readonly argv: readonly string[] };
   readonly artifacts?: readonly string[];
   readonly memoryFloorMb?: number;
+  /**
+   * What the liveness probe runs INSTEAD of the compiler or interpreter,
+   * and the name `/health` reports it under. See `toolchainProbes`.
+   */
+  readonly toolchain?: { readonly name: string; readonly bin: string };
+  readonly jvm?: JvmMemory;
 }
+
+/**
+ * How a JVM language's memory is enforced, which is not how anything
+ * else's is.
+ *
+ * Every other runtime is capped by `--rlimit_as` at the enforced limit:
+ * the allocation is refused and the program dies with a signature
+ * `src/verdict` reads. HotSpot cannot run that way. It RESERVES address
+ * space it never touches — the code cache, the class space, a 64 MB
+ * stack, the whole `lib/modules` image mmap()ed at startup — several
+ * hundred MB before `main()` runs, so under an address-space cap equal to
+ * a 256 MB problem limit the JVM does not start at all.
+ *
+ * So for a JVM the two jobs are split:
+ *
+ *  - the HEAP is capped by `-Xmx`, at `memLimitMb - nonHeapMb`. The
+ *    subtraction is what keeps the limit meaning "the whole process":
+ *    `nonHeapMb` is the room the JVM's own metaspace, code cache and
+ *    thread stacks occupy on top of the heap, so a program that fills
+ *    its heap peaks at about the enforced limit, not 60 MB past it. A
+ *    full heap raises `OutOfMemoryError`, which is this runtime's
+ *    allocation-failure signature (`ALLOCATION_FAILURE_RE`).
+ *  - the ADDRESS SPACE cap is raised to `memLimitMb + addressSpaceExtraMb`
+ *    so the reservations above fit. It is still a cap, and still the only
+ *    kernel-enforced bound on what a Java program can hold OUTSIDE the
+ *    heap (`Unsafe`, direct buffers), which is why the number is the
+ *    measured need plus a margin rather than "unlimited".
+ */
+interface JvmMemory {
+  readonly nonHeapMb: number;
+  readonly addressSpaceExtraMb: number;
+}
+
+/** The placeholder a JVM run argv carries where its heap cap goes. */
+const HEAP_PLACEHOLDER = "<HEAP_MB>";
+
+/**
+ * The smallest heap a JVM is ever started with. Unreachable through
+ * `languages.json` as it stands — the Java entries' 256 MB floor leaves
+ * 192 — but `HOST_MEMORY_CEILING_MB` is an operator's number, and a
+ * ceiling set below `nonHeapMb` would otherwise ask for `-Xmx-8m` and
+ * turn every Java submission into an unexplained `RE`.
+ */
+const MIN_JVM_HEAP_MB = 16;
 
 const entries: Readonly<Record<Language, LanguageEntry>> = table;
 
@@ -57,7 +115,14 @@ export interface LanguageSpec {
    * the schema does not change again when it is.
    */
   readonly artifacts: readonly string[];
+  /**
+   * How to start the program. For a JVM language this is a TEMPLATE
+   * carrying `<HEAP_MB>`; nothing may execute it directly — go through
+   * `runPlan`, which is the one place the placeholder is resolved.
+   */
   readonly runArgv: readonly string[];
+  /** Present for a JVM language only. See `JvmMemory`. */
+  readonly jvm: JvmMemory | undefined;
   /**
    * The language's minimum enforced memory cap, or undefined when it sets
    * none. A FLOOR, not a default: `effectiveMemLimitMb` takes
@@ -135,6 +200,16 @@ function buildSpec(id: Language): LanguageSpec {
   if (entry.run.length === 0) {
     throw new Error(`languages.json: ${id}.run is empty`);
   }
+  // A JVM entry whose argv has nowhere to put the heap cap would start
+  // with HotSpot's default — a quarter of the HOST's RAM — and no
+  // submission would ever be graded MLE. The reverse, a placeholder with
+  // no `jvm` block to resolve it, hands the literal text to `java`.
+  const templated = entry.run.some((arg) => arg.includes(HEAP_PLACEHOLDER));
+  if (templated !== (entry.jvm !== undefined)) {
+    throw new Error(
+      `languages.json: ${id} must have both a jvm block and ${HEAP_PLACEHOLDER} in run, or neither`,
+    );
+  }
   const artifacts = entry.artifacts ?? [];
   const compile = entry.compile;
   if (compile === undefined) {
@@ -144,6 +219,7 @@ function buildSpec(id: Language): LanguageSpec {
       compileArgv: null,
       artifacts,
       runArgv: entry.run,
+      jvm: entry.jvm,
       memoryFloorMb: entry.memoryFloorMb,
     };
   }
@@ -154,9 +230,13 @@ function buildSpec(id: Language): LanguageSpec {
   return {
     id,
     filename: entry.filename,
-    compileArgv: cppCompileArgv(compile.cc, compile.std, entry.filename, artifact),
+    compileArgv:
+      "argv" in compile
+        ? compile.argv
+        : cppCompileArgv(compile.cc, compile.std, entry.filename, artifact),
     artifacts,
     runArgv: entry.run,
+    jvm: entry.jvm,
     memoryFloorMb: entry.memoryFloorMb,
   };
 }
@@ -175,6 +255,37 @@ export function languageSpec(id: Language): LanguageSpec {
   return spec;
 }
 
+/** What to execute for one submission, and under which address-space cap. */
+export interface RunPlan {
+  readonly argv: readonly string[];
+  /**
+   * The `--rlimit_as` value, in MB, when it must differ from the enforced
+   * memory limit; undefined — the sandbox then uses the limit itself —
+   * for every language but the JVM ones.
+   */
+  readonly addressSpaceMb: number | undefined;
+}
+
+/**
+ * Resolve a spec against the memory limit the route enforced.
+ *
+ * For everything but a JVM this is the identity: the argv as written, and
+ * no address-space override, so `--rlimit_as` stays the enforced limit
+ * and cannot drift from it. For a JVM it is where `JvmMemory`'s split is
+ * applied, in one place, from the one number the route clamped.
+ */
+export function runPlan(spec: LanguageSpec, memLimitMb: number): RunPlan {
+  const jvm = spec.jvm;
+  if (jvm === undefined) {
+    return { argv: spec.runArgv, addressSpaceMb: undefined };
+  }
+  const heapMb = Math.max(MIN_JVM_HEAP_MB, Math.floor(memLimitMb - jvm.nonHeapMb));
+  return {
+    argv: spec.runArgv.map((arg) => arg.replace(HEAP_PLACEHOLDER, String(heapMb))),
+    addressSpaceMb: Math.floor(memLimitMb + jvm.addressSpaceExtraMb),
+  };
+}
+
 /**
  * The compile settings problem-setter code is built with: the `cpp17`
  * entry's, i.e. the same dialect a contestant's `cpp17` submission gets.
@@ -188,9 +299,9 @@ export function languageSpec(id: Language): LanguageSpec {
  * `docs/adr/0003-problem-setter-code-compiles-under-the-submission-dialect.md`.
  */
 function setterCompile(): { readonly cc: string; readonly std: string } {
-  const compile = entries.cpp17.compile;
-  if (compile === undefined) {
-    throw new Error("languages.json: cpp17 has no compile step");
+  const compile: LanguageEntry["compile"] = entries.cpp17.compile;
+  if (compile === undefined || "argv" in compile) {
+    throw new Error("languages.json: cpp17 has no g++ compile step");
   }
   return compile;
 }
@@ -210,8 +321,8 @@ export interface ToolchainProbe {
 }
 
 /**
- * One probe per DISTINCT binary in the table — python3, pypy3 and g++
- * today, since the four C++ entries share one `cc`.
+ * One probe per DISTINCT command in the table — python3, pypy3, g++
+ * (the four C++ entries share one `cc`) and one per Java version.
  *
  * The binaries come from `languages.json` rather than being spelled out
  * in `liveness/`, because that is what submissions actually execute:
@@ -224,21 +335,42 @@ export interface ToolchainProbe {
  * entries naming the same binary collapse to the first one's probe args;
  * a language whose runtime needs a different version flag needs a
  * different binary anyway.
+ *
+ * **A `toolchain` entry replaces the derived binary, and Java is why.**
+ * Its version flag boots a JVM: tens of milliseconds of CPU apiece, three
+ * of them, every 30 s, against a 2 s timeout on a ~0.1-CPU host where
+ * they compete with the submission being judged. That is a health check
+ * that flaps `degraded` under exactly the load it is meant to survive.
+ * So a Java entry is probed with `/usr/bin/test -x` on its `java` and
+ * `javac` instead — it catches the failure a probe is for (a runtime
+ * installed in the wrong Dockerfile stage, or not at all) for the cost of
+ * two `stat`s, and leaves "the JVM actually runs" to the Java goldens in
+ * `test/fixtures/e2e`, which CI replays on every push.
  */
 export function toolchainProbes(): readonly ToolchainProbe[] {
   const probes = new Map<string, ToolchainProbe>();
   for (const id of ALL_LANGUAGES) {
-    const entry = entries[id];
+    const entry: LanguageEntry = entries[id];
     // A compiled language's toolchain is its COMPILER; its run argv is
     // `./a.out`, which does not exist until something compiles it.
-    const bin = entry.compile?.cc ?? entry.run[0];
+    const compile = entry.compile;
+    const compiler =
+      compile === undefined ? undefined : "argv" in compile ? compile.argv[0] : compile.cc;
+    const bin = entry.toolchain?.bin ?? compiler ?? entry.run[0];
     if (bin === undefined) {
       // Unreachable: `buildSpec` already refused an empty run argv at
       // import time. A typed guard rather than a non-null assertion.
       throw new Error(`languages.json: ${id}.run is empty`);
     }
-    if (!probes.has(bin)) {
-      probes.set(bin, { name: path.basename(bin), bin, args: entry.probe });
+    // Keyed by the whole command, not the binary: the three Java probes
+    // share `/usr/bin/test` and differ only in what they test.
+    const key = [bin, ...entry.probe].join("\0");
+    if (!probes.has(key)) {
+      probes.set(key, {
+        name: entry.toolchain?.name ?? path.basename(bin),
+        bin,
+        args: entry.probe,
+      });
     }
   }
   return [...probes.values()];

@@ -480,6 +480,21 @@ test("bad_alloc on stderr with exit 134 is MLE", async () => {
   assert.equal(result.verdict, "MLE");
 });
 
+test("an uncaught OutOfMemoryError with exit 1 is MLE", async () => {
+  // A JVM's limit is its `-Xmx` heap cap, not RLIMIT_AS, so this stderr
+  // is the ONLY thing that tells a Java MLE from any other uncaught
+  // exception: exit 1 either way, RSS below the cap either way.
+  const run = measurement({
+    exitCode: 1,
+    stderr: 'Exception in thread "main" java.lang.OutOfMemoryError: Java heap space\n\tat Main.main(Main.java:9)\n',
+  });
+  const result = await gradeCase(
+    { index: 0, expected: "", run, limits: LIMITS },
+    trimTrailingJudge(""),
+  );
+  assert.equal(result.verdict, "MLE");
+});
+
 test("the same stderr with exit 0 is graded by the judge and is never MLE", async () => {
   // The clean-exit gate. A program that exit(0)'d fit inside its budget
   // however close it got — and it can legitimately print the word

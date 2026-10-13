@@ -107,6 +107,22 @@ jobs:
       - if: failure()
         run: docker logs judge
 
+  # TEMPORARY, removed before merge: measure the JVMs under the real jail.
+  java-probe:
+    if: github.event_name == 'pull_request'
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+      - run: docker load < image.tgz
+      - run: docker image ls wmoj-judge:ci
+      - run: |
+          docker run --rm -v "$PWD/.github/java-probe.js:/probe.js:ro" \
+            --entrypoint node wmoj-judge:ci /probe.js
+
   # A fresh capture of the goldens, uploaded as an artifact for a human to
   # review against Appendix A of the plan and commit. It runs on
   # workflow_dispatch and also on pull requests: a workflow_dispatch can only

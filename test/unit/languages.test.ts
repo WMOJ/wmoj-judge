@@ -7,6 +7,7 @@ import {
   cppCompileArgv,
   isLanguage,
   languageSpec,
+  runPlan,
   setterCompileArgv,
   toolchainProbes,
   type Language,
@@ -33,6 +34,8 @@ const CPP_STANDARDS: Readonly<Record<string, string>> = {
 
 const INTERPRETED: readonly Language[] = ["python3", "pypy3"];
 
+const JAVA: readonly Language[] = ["java11", "java17", "java21"];
+
 test("every key of languages.json resolves to a spec, and nothing else does", () => {
   const keys = Object.keys(table);
   assert.deepEqual([...ALL_LANGUAGES], keys);
@@ -50,7 +53,9 @@ test("isLanguage rejects the legacy aliases and every non-language value", () =>
   // python3. `/generate-tests` keeps its own list and still takes "cpp".
   assert.equal(isLanguage("python"), false);
   assert.equal(isLanguage("cpp"), false);
+  // Java is back as three versioned codes; a bare `java` names none of them.
   assert.equal(isLanguage("java"), false);
+  assert.equal(isLanguage("java8"), false);
   assert.equal(isLanguage(""), false);
   assert.equal(isLanguage(42), false);
   assert.equal(isLanguage(null), false);
@@ -107,10 +112,13 @@ test("the compile argv names the source and the artifact by relative name", () =
   );
 });
 
-test("pypy3 is the only language with a memory floor, and it is 384", () => {
+test("only the runtimes with a large baseline declare a memory floor", () => {
   assert.equal(languageSpec("pypy3").memoryFloorMb, 384);
+  for (const id of JAVA) {
+    assert.equal(languageSpec(id).memoryFloorMb, 256, `${id} needs room for the JVM itself`);
+  }
   for (const id of ALL_LANGUAGES) {
-    if (id === "pypy3") continue;
+    if (id === "pypy3" || JAVA.includes(id)) continue;
     assert.equal(
       languageSpec(id).memoryFloorMb,
       undefined,
@@ -139,16 +147,20 @@ test("the problem-setter compile is the submission dialect, from the cpp17 entry
 
 test("there is one toolchain probe per distinct binary, each an absolute path", () => {
   const probes = toolchainProbes();
-  assert.equal(probes.length, 3, "python3, pypy3 and one g++ for all four C++ entries");
+  assert.equal(
+    probes.length,
+    6,
+    "python3, pypy3, one g++ for all four C++ entries, and one per Java version",
+  );
   assert.deepEqual(
     probes.map((p) => p.name),
-    ["python3", "pypy3", "g++"],
+    ["python3", "pypy3", "g++", "java11", "java17", "java21"],
     "the names appear in /health's reason string",
   );
   assert.equal(
-    new Set(probes.map((p) => p.bin)).size,
+    new Set(probes.map((p) => [p.bin, ...p.args].join(" "))).size,
     probes.length,
-    "each probe must name a different binary",
+    "each probe must run a different command",
   );
   for (const probe of probes) {
     assert.ok(
@@ -160,13 +172,89 @@ test("there is one toolchain probe per distinct binary, each an absolute path", 
 });
 
 test("every probed binary is one a language actually runs or compiles with", () => {
-  const bins = new Set(toolchainProbes().map((p) => p.bin));
+  // A probe covers a binary either by running it or — the Java probes,
+  // which `test -x` instead of booting a JVM — by naming it as an argument.
+  const covered = new Set(toolchainProbes().flatMap((p) => [p.bin, ...p.args]));
   for (const id of ALL_LANGUAGES) {
     const spec = languageSpec(id);
     const bin = spec.compileArgv === null ? spec.runArgv[0] : spec.compileArgv[0];
     assert.ok(
-      bin !== undefined && bins.has(bin),
+      bin !== undefined && covered.has(bin),
       `${id} runs ${String(bin)}, which nothing probes`,
+    );
+  }
+});
+
+test("a Java probe never boots a JVM", () => {
+  // Three `java -version` every 30 s against a 2 s timeout on a ~0.1-CPU
+  // host is a health check that goes degraded under load. The probe
+  // checks that both launchers exist and are executable, and nothing more.
+  for (const probe of toolchainProbes()) {
+    if (!probe.name.startsWith("java")) continue;
+    assert.equal(probe.bin, "/usr/bin/test");
+    const version = probe.name.slice("java".length);
+    assert.deepEqual(
+      [...probe.args],
+      ["-x", `/opt/java/${version}/bin/java`, "-a", "-x", `/opt/java/${version}/bin/javac`],
+    );
+  }
+});
+
+test("every Java version compiles with its own javac into one cached directory", () => {
+  for (const id of JAVA) {
+    const spec = languageSpec(id);
+    const home = `/opt/java/${id.slice("java".length)}`;
+    const argv = [...(spec.compileArgv ?? [])];
+    assert.equal(argv[0], `${home}/bin/javac`);
+    assert.equal(spec.filename, "Main.java");
+    assert.equal(argv[argv.length - 1], "Main.java", "the source is named relatively");
+    // `-d classes` is what makes the artifact ONE name: javac emits a
+    // class file per class, nested and anonymous ones included, and the
+    // compile cache stores only what `artifacts` lists.
+    assert.deepEqual(argv.slice(-3, -1), ["-d", "classes"]);
+    assert.deepEqual([...spec.artifacts], ["classes"]);
+    // An unbounded javac sizes its heap from the HOST's RAM.
+    assert.ok(argv.some((arg) => /^-J-Xmx\d+m$/.test(arg)), `${id}'s javac heap must be capped`);
+  }
+});
+
+test("a JVM run plan caps the heap below the limit and raises the address space above it", () => {
+  for (const id of JAVA) {
+    const spec = languageSpec(id);
+    const plan = runPlan(spec, 256);
+    assert.ok(plan.argv.includes("-Xmx192m"), `${id}: heap is the limit minus the JVM's own 64 MB`);
+    assert.ok(
+      !plan.argv.some((arg) => arg.includes("<HEAP_MB>")),
+      `${id}: the placeholder must never reach java`,
+    );
+    assert.ok(
+      plan.addressSpaceMb !== undefined && plan.addressSpaceMb > 256,
+      `${id}: HotSpot cannot start under an address-space cap equal to the limit`,
+    );
+    // Both numbers track the ENFORCED limit.
+    assert.ok(runPlan(spec, 384).argv.includes("-Xmx320m"));
+    assert.equal(
+      (runPlan(spec, 384).addressSpaceMb ?? 0) - (plan.addressSpaceMb ?? 0),
+      128,
+    );
+    // A host ceiling below the JVM's own overhead must not ask for a
+    // negative heap.
+    assert.ok(runPlan(spec, 32).argv.includes("-Xmx16m"));
+    // The template itself is untouched: the plan is a copy.
+    assert.ok(spec.runArgv.includes("-Xmx<HEAP_MB>m"));
+  }
+});
+
+test("every other language runs its argv as written, under the limit itself", () => {
+  for (const id of ALL_LANGUAGES) {
+    if (JAVA.includes(id)) continue;
+    const spec = languageSpec(id);
+    const plan = runPlan(spec, 256);
+    assert.deepEqual([...plan.argv], [...spec.runArgv]);
+    assert.equal(
+      plan.addressSpaceMb,
+      undefined,
+      `${id} must stay under --rlimit_as == the enforced limit, or a refused allocation stops meaning MLE`,
     );
   }
 });

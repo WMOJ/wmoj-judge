@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import * as path from "path";
 
 /**
  * Cap on how much of a compiler's stdout/stderr the judge keeps, per stream.
@@ -129,12 +130,15 @@ export function runCompile(
       // a signal, or exiting non-zero without printing. The caller puts this
       // string straight into the body `wmoj-app` renders, so an empty one is a
       // compile error with no explanation. Say what actually happened.
+      // Named from the argv: this runs javac as well as g++, and telling
+      // a Java student that g++ was killed explains nothing.
+      const compiler = path.basename(cmd);
       resolve({
         ok: false,
         stderr:
           signal !== null
-            ? `g++ was killed by ${signal}`
-            : `g++ exited ${code} with no diagnostics`,
+            ? `${compiler} was killed by ${signal}`
+            : `${compiler} exited ${code} with no diagnostics`,
       });
     });
   });
