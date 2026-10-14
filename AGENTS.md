@@ -18,29 +18,18 @@ size caps, the compile cache, CPU-time TLE — follows from that host, not from 
 ## Commands
 
 ```bash
-npm ci
 npm run build       # tsc → dist/ — builds AND typechecks src/
 npm run typecheck   # tsc over src/ AND test/ (tsconfig.test.json), emits nothing
 npm test            # node:test unit suite in test/unit — pure modules, no container
 npm run test:e2e    # replays test/fixtures/e2e against JUDGE_URL; needs a running judge
-npm run dev         # tsx watch (Linux only)
-docker build --platform=linux/amd64 -t wmoj-judge .
-docker run --rm -p 4001:4001 -e JUDGE_SHARED_SECRET=… -e AUTH_STRICT=true wmoj-judge
+docker build --platform=linux/amd64 -t wmoj-judge .   # nsjail is Linux-only: Docker or nothing
 ```
 
 **No lint, no format script.** Three gates: `build`, `typecheck`, `test`; CI runs them plus the e2e
-goldens against the amd64 image on every push. MLE and seccomp behaviour is only exercisable on an
-amd64 kernel — on arm64 the e2e replay skips those fixtures (→ **`run-judge-locally`**) — so **a
-verdict-affecting change is not verified until CI is green.** Tests live in `test/`, outside
-`rootDir`, so they can never ship in `dist/`.
-
-- **Won't run natively on macOS** — nsjail is Linux-only. Use Docker.
-- **`.env.local` is intentionally not loaded** (no `dotenv`, no `--env-file`); local runs fall back
-  to `AUTH_STRICT=false`. Production vars come from the Render dashboard.
-- **Refuses to boot** unless every `src/liveness` check passes — a judge that cannot measure must not
-  accept submissions. `NODE_ENV=production` is baked in, so a missing `JUDGE_SHARED_SECRET` exits 1.
-- **Build `--platform=linux/amd64`.** `policy.kafel` targets the amd64 syscall table; built for
-  arm64 it will not compile and nsjail exits 255, so the boot probe above refuses to start.
+goldens against the amd64 image on every push. MLE and seccomp behaviour exists only on an amd64
+kernel (arm64 skips those fixtures), so **a verdict-affecting change is not verified until CI is
+green.** The judge **refuses to boot** unless every `src/liveness` check passes — one that cannot
+measure must not accept submissions.
 
 ## Skills
 
@@ -49,99 +38,45 @@ skill *before* touching the area; each holds failure modes this file has no room
 `sandbox-changes` (`src/sandbox/**`, `policy.kafel`, `Dockerfile`) · `custom-checkers`
 (`src/checker/`, the `checker` field) · `add-language` (a language or a compiler flag) ·
 `verdicts-and-comparison` (`gradeCase`, the MLE rules, `src/compare/`) · `judge-app-contract`
-(any request/response field, env-var name, or verdict string) · `run-judge-locally` (building,
-booting or smoke-testing the container, and pairing it with a local `wmoj-app`).
+(any request/response field, env-var name, or verdict string) · `request-pipeline` (`server.ts`,
+middleware, size caps, concurrency, `config.ts`, shutdown) · `run-judge-locally` (building, booting
+or smoke-testing the container, env vars, Apple Silicon, pairing it with a local `wmoj-app`).
 
 ## API
 
-Middleware order (`src/server.ts`): `httpLogger → cors() → /health →
-[rateLimit, auth, express.json(JSON_BODY_LIMIT), requestCaps, in-flight counter] → /submit,
-/generate-tests`. **The body parser is inside the gated chain**, so an unauthenticated giant POST is
-rejected before it is buffered, and the rate limiter sits *ahead* of auth so 401 floods are throttled
-too. There is **no 404 handler and no global error handler**, so unmatched paths get Express's
-default **HTML**; gates mount with `app.use`, so even `GET /submit` runs auth first.
+`POST /submit` and `POST /generate-tests` sit behind rate limit → auth → body parser → size caps,
+in that order; `GET /health` is unauthenticated by design. Every field, status code and verdict
+string is a cross-repo interface → **`judge-app-contract`**.
 
-**`POST /submit`** —
-`{language, code, input[], output[], timeLimit?, memoryLimit?, compareMode?, checker?}`;
-`input`/`output` must be equal-length string arrays. Returns 200 with
-`{summary:{total,passed,failed}, results[], effectiveMemoryLimitMb}`.
-
-`effectiveMemoryLimitMb = floor(max(1, min(max(requested, language floor) || 256, ceiling)))` is the
-cap actually enforced — an integer, so advertised and enforced always agree. Present on **every** 200.
-`TestResult` also carries real `cpuMs`/`memKb` and an optional `truncated`.
+`/submit` takes `{language, code, input[], output[], timeLimit?, memoryLimit?, compareMode?,
+checker?}` and returns 200 `{summary:{total,passed,failed}, results[], effectiveMemoryLimitMb}` —
+the last being the cap actually enforced, after the language floor and the **384 MB** host ceiling.
 
 > **A compile error is HTTP 200** — `{summary:{0,0,0}, results:[], compileError}`. **A checker that
 > fails to compile is HTTP 200 with a separate top-level `checkerError`.** Never merge the two:
 > `wmoj-app` synthesizes a user-facing `CE` from `compileError`, and a broken checker is a
 > problem-configuration fault, not the student's. 4xx/5xx means the request or the judge is wrong,
-> never the user's code.
-
-**`POST /generate-tests`** — `{code, language?}`. The generator prints a JSON array of inputs to
-**stdout** and expected outputs to **stderr**, equal length; a compile failure is **400**, not 200.
-It now enforces the same per-case and aggregate caps `/submit` will later apply, so it cannot hand an
-admin test data the judge would refuse. Limits 60 s / 1024 MB, bypassing the host clamp. Documented
-admin-only but **not enforced**, and it **bypasses the global semaphore**.
-
-**`GET /health`** — unauthenticated by design (Render probes). Five checks in `src/liveness`: three
-toolchains and a sandbox launch every 30 s, the sandbox *measuring* (the CPU-time self-check that
-once ran only at boot) every 5 min; boot runs all five. `200 {status,version,seccomp}`, `503
-{status:"degraded",reason,version,seccomp}`, or 503 `"draining"` while shutting down. `version` is
-`RENDER_GIT_COMMIT` if set, else package version + start time; `seccomp` is `enforced`/`disabled`.
-
-## Size caps and the memory clamp
-
-Decided in `src/budget` (one walk, UTF-8 bytes) and enforced by `requestCaps` (413) and
-`/generate-tests` (400) from that same walk: **200** cases, **1,000,000** bytes per input and per
-expected output, 100,000 per source and per checker, and an **aggregate** `MAX_TOTAL_REQUEST_BYTES`
-= 16 MiB over `code + checker + Σinput + Σoutput`. `JSON_BODY_LIMIT` is `"32mb"`, 2× the aggregate,
-in the same module, asserted by `test/unit/budget.test.ts`, so the parser limit can never again sit
-*below* the largest legal payload — it used to, so a legal max-size body got Express's HTML 413.
-Changing any cap means changing `wmoj-app`'s `judge.sh` constants in the same commit.
-
-Every submission's cap is clamped to `min(requested, HOST_MEMORY_CEILING_MB)` — **384**, not 512:
-Node and the compile cache share the same 512 MB, so a ceiling equal to the box means the OOM-killer
-fires before `RLIMIT_AS` and every in-flight submission dies instead of one getting a clean `MLE`.
-`/generate-tests` is exempt.
+> never the user's code. (`/generate-tests` is the deliberate opposite: a broken generator is 400.)
 
 ## Sandbox
 
 **Deliberately weaker than a textbook sandbox**, stripped down to run unprivileged. Active: seccomp
-BPF (`policy.kafel`, dropped only by the dev-only `UNSAFE_DISABLE_SECCOMP`, which `config.ts` refuses
-under `NODE_ENV=production`), rlimits, a per-submission `0700` tmpdir, a 4-var env allowlist (`PATH`,
-`LANG`, `LC_ALL`, `PYTHONUNBUFFERED`). Disabled: **all seven namespaces** (user, net, mnt, pid, ipc,
-uts, cgroup), chroot, `--user`/`--group`, cgroups.
-
-- Every submission runs as **UID 1000 — the same UID as the Node process** — sharing its PID, mount,
-  and network namespaces. The UID pool is now just a concurrency gate.
-- **Network is blocked by seccomp alone.** There is no second layer.
-- `open`/`read`/`write`/`getdents64` are allowed with **no path filtering and no chroot**, and every
-  submission shares UID 1000 and one `/tmp` root, so **cross-submission isolation does not hold**.
-  `prlimit64` and `sched_setaffinity` are filtered to `pid == 0` so a submission cannot retarget the
-  judge; `kill`/`tgkill` deliberately are not (CPython's `abort()` needs a non-zero pid).
-- **Compilation is NOT sandboxed** — `g++` is spawned directly (`util/compile.ts`) with no timeout
-  and no rlimits for submissions, checkers and generators alike. A compile bomb can OOM the
-  service, and `#include` of an arbitrary path leaks its contents through `compileError`. Only the
-  *run* step goes through nsjail.
-- **Resource accounting comes from `wmoj-jailrun`**, a small C wrapper built into the image that
-  execs nsjail, `wait4()`s it with `rusage`, and reports over a `FD_CLOEXEC` fd the jailed program
-  cannot reach — nsjail 3.3 emits **no** rusage.
-- Every flag, rlimit, and seccomp rule prevents one specific failure → **`sandbox-changes`**.
+BPF (`policy.kafel`), rlimits, a per-submission `0700` tmpdir, a 4-var env allowlist (`PATH`,
+`LANG`, `LC_ALL`, `PYTHONUNBUFFERED`). Disabled: all seven namespaces, chroot, `--user`/`--group`,
+cgroups. So every submission runs as **UID 1000 — the same UID as the Node process** — network is
+blocked by **seccomp alone**, and cross-submission isolation does not hold. **Compilation is not
+sandboxed at all**: `g++` is spawned directly, and only the *run* step goes through nsjail. Every
+flag, rlimit and seccomp rule prevents one specific failure, and the known weaknesses are listed,
+not fixed — don't rediscover them → **`sandbox-changes`**.
 
 ## Verdicts
 
 `Verdict = AC | WA | TLE | MLE | RE | CE | IE`. **`gradeCase` in `src/verdict` is the only place a
-verdict is decided; the sandbox reports measurements and nothing else.** Its TLE → MLE → RE → IE →
-WA/AC order and the kill ladder are internals guarded by `test/unit/verdict.test.ts` and the fixtures.
+verdict is decided; the sandbox reports measurements and nothing else** → `verdicts-and-comparison`.
 
-- `IE` is produced **only** by a custom checker that could not answer — including one that crashed,
-  tripped seccomp, or could not be exec'd. Never let that reach a student as `WA`.
-- **`CE` is declared but never produced** — compile failures surface via
-  `compileError`/`checkerError`, and `wmoj-app` synthesizes its own `CE`.
-- A case passes only if the run finished cleanly (exit 0, no kill class) **and** the checker accepted
-  (or, with no checker, `compare(...)` matched) — correct output with a non-zero exit fails.
-- **No early exit** — every case runs after a failure. An `IE` case counts as failed in `summary`.
-- Default comparator `trim-trailing`. **Comparators must stay linear**: the trailing-whitespace regex
-  was quadratic, and one ordinary `printf("%1000000d")` blocked the event loop for ~26 minutes.
+- `IE` comes **only** from a custom checker that could not answer — never show a student `WA` for it.
+- **`CE` is declared but never produced** — `wmoj-app` synthesizes it from `compileError`.
+- **No early exit** — every case runs after a failure, serially, and TLE is decided on CPU time.
 - Partial scoring, subtasks and interactive problems are unsupported; scoring lives in `wmoj-app`.
 
 ## Languages
@@ -153,33 +88,15 @@ host-wide per-UID task limit stops every jailed thread, so the JVM cannot boot �
 
 ## Concurrency & config
 
-Three throttles: `submitSemaphore` (p-limit at `max(1, min(cpuCount, ceiling/256))` — **not**
-`os.cpus().length`, which inside a container reads the *host's* CPU count; **`/submit` only**), a
-per-submission pool (**1 = serial**, deliberate — parallel runs on shared vCPUs made TLE
-non-deterministic), and the **16-UID pool, which is the true ceiling** and covers both gated
-endpoints — both lease it through `withWorkspace`, which also brackets the in-flight counter so a
-client disconnect no longer drops the count mid-judging. All in-process promise scheduling — no
-worker_threads, no queue workers. Backpressure is **queue-never-reject**: no depth cap, no timeout,
-no disconnect handling; a burst past the rate limiter queues indefinitely with the connection held
-open.
-
-`src/config.ts` is the env boundary — everything else imports the frozen `config`; `.env.example`
-documents every variable. One exception: `sandbox/minimalEnv.ts` reads `process.env.PATH`. **A
-malformed value throws at boot** rather than silently becoming a different number, and
-`readSharedSecret()` deletes the secret from `process.env` after reading it.
-
-`AUTH_STRICT` **defaults to `IS_PROD`** — fail-open in dev, fail-closed in production. In soft mode a
-**missing** token is let through, not just a wrong one. CORS is wide open (`*`) and the secret is the
-only gate, so **never call this service from browser code**. Rate limiting is 60/min across both
-gated routes; with no `trust proxy` and one token, all of wmoj-app shares one bucket.
-
-Graceful shutdown: `SIGTERM`/`SIGINT` → both routes 503 → a single **25 s whole-drain budget**
-stamped at signal receipt, from which `server.close()`, idle-close, drain and force-close all derive
-→ `rm -rf` workdirs → flush pino → exit 0. A second signal exits 1 immediately.
+All in-process promise scheduling: a `/submit` semaphore, serial cases within a submission, and a
+16-UID pool that is the true ceiling. Backpressure is **queue-never-reject** → `request-pipeline`.
+`src/config.ts` is the env boundary — everything else imports the frozen `config`, `.env.example`
+documents every variable, and **a malformed value throws at boot**. `AUTH_STRICT` is fail-open
+outside production, CORS is `*` and the shared secret is the only gate, so **never call this service
+from browser code**: `wmoj-app` calls it only from server-side route handlers, with
+**`X-Judge-Token`** carrying a `JUDGE_SHARED_SECRET` that must be identical on both sides.
 
 ## Code conventions
-
-Verified repo-wide by exhaustive grep — match them.
 
 - CommonJS, **no `.js` extensions in imports**; **named exports only**; `import type` used throughout.
 - **Zero `any`, and zero TODO/FIXME/HACK/XXX markers.** Known weaknesses are prose in JSDoc.
@@ -206,28 +123,11 @@ pack the reason in via a `so <consequence>` clause. **Zero trailers of any kind.
 6. Never widen the seccomp allowlist, the compile trust boundary, or the env allowlist just to make
    something work.
 
-## Known issues (don't rediscover; not currently being fixed)
-
-- `config.ts` deletes `JUDGE_SHARED_SECRET` from `process.env`, but `unsetenv()` only drops the
-  pointer — the string stays in the process's env memory. With shared UID 1000, no PID namespace,
-  and allowed `open`/`read`, user code can plausibly read it from `/proc/<pid>/environ`. Unverified.
-- The compile cache has **no size cap** (TTL-only, 15 min, no LRU). It does *not* leak across
-  restarts: `startupSweep()` removes every `os.tmpdir()` entry starting with `judge-`, so moving
-  `COMPILE_CACHE_DIR` off that prefix *introduces* a leak.
-- **`PYTHONHASHSEED` is not set**, so CPython/PyPy hash randomization stays on and set/dict iteration
-  order varies run to run — any problem whose expected output depends on it is flaky.
-
-## Related repo
-
-`wmoj-app` — the Next.js client, with its own `AGENTS.md`. It calls this service only from
-server-side route handlers with **`X-Judge-Token`**, and `JUDGE_SHARED_SECRET` must be identical on
-both sides (constant-time compare; a length mismatch short-circuits before `timingSafeEqual`).
-
 ---
 
 ## Maintenance
 
-Keep this file current, and keep it at or under **250 lines**. AGENTS.md is updated in the same
+Keep this file current, and keep it at or under **150 lines**. AGENTS.md is updated in the same
 commit as the code, and letting it go stale is leaving the work unfinished.
 
 ⚠️ **Maintenance here is ZERO-SUM.** The line budget is the point, not an accident: a file nobody

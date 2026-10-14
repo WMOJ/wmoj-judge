@@ -161,7 +161,9 @@ against this same budget until reaped). Per-submission process accounting would 
 this host does not have.
 
 The env allowlist is exactly four `--env` entries: `PATH`, `LANG`, `LC_ALL`, `PYTHONUNBUFFERED`.
-Never add a fifth to make something work.
+Never add a fifth to make something work. One known consequence: **`PYTHONHASHSEED` is not set**, so
+CPython/PyPy hash randomization stays on and set/dict iteration order varies run to run — any
+problem whose expected output depends on it is flaky. Not currently being fixed.
 
 ## Process lifetime: settle on `'exit'`, kill the group
 
@@ -300,7 +302,10 @@ there is no PID namespace, and the Node process shares UID 1000, so a submission
 PID through `/proc` and SIGKILL it.
 
 **3. Compile-cache poisoning through the shared `/tmp`.** Every workdir and `/tmp/judge-cache` belong
-to the same UID, so the cache's `0700` mode buys nothing against another submission.
+to the same UID, so the cache's `0700` mode buys nothing against another submission. The cache also
+has **no size cap** (TTL-only, 15 min, no LRU). It does *not* leak across restarts: `startupSweep()`
+removes every `os.tmpdir()` entry starting with `judge-`, so moving `COMPILE_CACHE_DIR` off that
+prefix *introduces* a leak.
 
 **4. There is exactly one UID, and it is not a boundary.** Every submission, `g++`, and the Node
 judge run as UID 1000. The per-submission `0700` `mkdtemp` workdir — leased, with its pool UID, by
@@ -314,6 +319,16 @@ memory.
 worst case is a polluted log line, plus a submission that can turn its **own** run into a judge-fault
 500 by forging an `[F]` prefix on an exit-255 run with no stdout. If it is ever confirmed
 inheritable, switch to `--log_file` pointing at a judge-owned temp file outside the workdir.
+
+**6. Compilation is NOT sandboxed.** `g++` is spawned directly (`src/util/compile.ts`) with no
+timeout and no rlimits, for submissions, checkers and generators alike; only the *run* step goes
+through nsjail. A compile bomb can OOM the service, and `#include` of an arbitrary path leaks its
+contents through `compileError`. Never widen this compile trust boundary.
+
+**7. The shared secret may be readable by user code.** `config.ts` deletes `JUDGE_SHARED_SECRET`
+from `process.env`, but `unsetenv()` only drops the pointer — the string stays in the process's env
+memory. With shared UID 1000, no PID namespace, and allowed `open`/`read`, a submission can plausibly
+read it from `/proc/<pid>/environ`. Unverified.
 
 ## Never
 
