@@ -146,9 +146,12 @@ WA/AC order and the kill ladder are internals guarded by `test/unit/verdict.test
 
 ## Languages
 
-`languages.json` is the source of truth and `src/languages` derives everything from it (`Language`
-is its `keyof`): `python3`, `pypy3` (384 MB floor), `cpp14/17/20/23`. Adding one → **`add-language`**.
-`/submit` takes only canonical codes; `/generate-tests` still takes bare `cpp` for `judge.sh`.
+`languages.json` is the source of truth; `src/languages` derives the rest: `python3`, `pypy3` (384 MB
+floor), `cpp14/17/20/23`. Adding one → **`add-language`**. `/generate-tests` alone takes bare `cpp`.
+
+**Never add Java (or any JVM language) while this runs on the Render instance.** It was tried and
+rolled back: Render's per-UID task limit is host-wide, so no jailed program can start a thread and
+the JVM cannot boot — while CI stays green. Making it run means weakening the sandbox. → **`add-language`**
 
 ## Concurrency & config
 
@@ -210,7 +213,6 @@ pack the reason in via a `so <consequence>` clause. **Zero trailers of any kind.
 - `config.ts` deletes `JUDGE_SHARED_SECRET` from `process.env`, but `unsetenv()` only drops the
   pointer — the string stays in the process's env memory. With shared UID 1000, no PID namespace,
   and allowed `open`/`read`, user code can plausibly read it from `/proc/<pid>/environ`. Unverified.
-- Unsandboxed, untimed compilation; one shared UID and one shared `/tmp` root (see Sandbox).
 - The compile cache has **no size cap** (TTL-only, 15 min, no LRU). It does *not* leak across
   restarts: `startupSweep()` removes every `os.tmpdir()` entry starting with `judge-`, so moving
   `COMPILE_CACHE_DIR` off that prefix *introduces* a leak.

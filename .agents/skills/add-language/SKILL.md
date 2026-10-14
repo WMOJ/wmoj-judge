@@ -7,7 +7,8 @@ description: Adds, removes, or changes a language in wmoj-judge — the language
 
 `languages.json` at the repo root is the source of truth, and `src/languages` derives everything
 else from it. Six IDs exist today: `python3`, `pypy3`, `cpp14`, `cpp17`, `cpp20`, `cpp23`. Java was
-removed; the JVM references still scattered through `policy.kafel` are historical.
+removed, re-added once and rolled back — see **Java** below before proposing it again; the JVM
+references still scattered through `policy.kafel` are historical.
 
 Adding one is a **JSON edit plus three things no compiler can know about** — the toolchain in the
 `Dockerfile`, the syscalls the runtime needs in `policy.kafel`, and an end-to-end golden captured on
@@ -111,8 +112,36 @@ from `/submit`'s: `wmoj-app`'s `judge.sh` sends bare `"cpp"` there and nowhere e
 every generator is built with `setterCompileArgv` — so **a new language is not automatically usable
 for generators.**
 
+## Java: do not add it while the judge is hosted on Render
+
+Java (`java11`/`java17`/`java21`) was added in October 2026, deployed, and rolled back the same day.
+It is a limitation of the host, like everything else in `AGENTS.md`'s "The constraint that explains
+this codebase", and it holds for any JVM language for as long as the judge runs on that instance.
+**Do not attempt it again there, and do not treat a green CI run as evidence that it works.**
+
+What was measured, so nobody has to rediscover it:
+
+- **No jailed program can create a thread or fork on Render.** `RLIMIT_NPROC` counts every task of
+  the real UID in the kernel's user namespace, and on Render that namespace is the whole host: other
+  tenants' UID-1000 tasks are in the count and it is always past the jail's `--rlimit_nproc 256`. A
+  C++ `pthread_create` and a `fork` submitted to production both returned `EAGAIN` with 15 tasks in
+  the container's own pids cgroup. Single-threaded runtimes never notice; HotSpot dies before
+  `main()` with `Cannot create VM thread. Out of system resources.` and every case is graded `RE`.
+- **CI cannot see it.** The GitHub runner has UID 1000 to itself, so every Java golden passed on
+  amd64 with seccomp enforced while production failed every case.
+- **Getting past it means weakening the sandbox for Java alone**: `--rlimit_nproc soft`, so a Java
+  submission can start threads and processes where nothing else can, bounded only by the pids
+  cgroup and the time limits.
+- **The JVM also cannot start under `--rlimit_as` equal to the limit.** It reserves address space it
+  never touches; the measured worst case needed the limit + 1088 MB, so the cap that makes a refused
+  allocation mean `MLE` for every other language has to be raised to about 1.5 GB above the limit,
+  and native memory outside the `-Xmx` heap is then bounded by nothing a 512 MB host can back.
+- It needed no `policy.kafel` change and `memfd_create` could stay refused — syscalls were never the
+  obstacle. The host is.
+
 ## Never
 
+- Never add Java or another JVM language while the judge is hosted on the Render instance — see above.
 - Never install a runtime in the Dockerfile's builder stage instead of the runtime stage.
 - Never add fields to `languages.json` that nothing reads (versions, multipliers, adders).
 - Never re-introduce a hand-kept list of language codes anywhere; membership in the JSON is the set.
