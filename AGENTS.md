@@ -148,10 +148,8 @@ WA/AC order and the kill ladder are internals guarded by `test/unit/verdict.test
 
 `languages.json` is the source of truth; `src/languages` derives the rest: `python3`, `pypy3` (384 MB
 floor), `cpp14/17/20/23`. Adding one → **`add-language`**. `/generate-tests` alone takes bare `cpp`.
-
-**Never add Java (or any JVM language) while this runs on the Render instance.** It was tried and
-rolled back: Render's per-UID task limit is host-wide, so no jailed program can start a thread and
-the JVM cannot boot — while CI stays green. Making it run means weakening the sandbox. → **`add-language`**
+**Never add Java or any JVM language while this is hosted on Render.** Tried and rolled back: the
+host-wide per-UID task limit stops every jailed thread, so the JVM cannot boot — yet CI stays green.
 
 ## Concurrency & config
 
